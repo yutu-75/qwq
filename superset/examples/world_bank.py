@@ -17,6 +17,7 @@
 """Loads datasets, dashboards and slices in a new superset instance"""
 import json
 import os
+from typing import List
 
 import pandas as pd
 from sqlalchemy import DateTime, inspect, String
@@ -24,8 +25,14 @@ from sqlalchemy.sql import column
 
 import superset.utils.database
 from superset import app, db
-from superset.connectors.sqla.models import BaseDatasource, SqlMetric
-from superset.examples.helpers import (
+from superset.connectors.sqla.models import SqlMetric
+from superset.models.dashboard import Dashboard
+from superset.models.slice import Slice
+from superset.utils import core as utils
+from superset.utils.core import DatasourceType
+
+from ..connectors.base.models import BaseDatasource
+from .helpers import (
     get_example_url,
     get_examples_folder,
     get_slice_json,
@@ -34,10 +41,6 @@ from superset.examples.helpers import (
     misc_dash_slices,
     update_slice_ids,
 )
-from superset.models.dashboard import Dashboard
-from superset.models.slice import Slice
-from superset.utils import core as utils
-from superset.utils.core import DatasourceType
 
 
 def load_world_bank_health_n_pop(  # pylint: disable=too-many-locals, too-many-statements
@@ -49,6 +52,7 @@ def load_world_bank_health_n_pop(  # pylint: disable=too-many-locals, too-many-s
     tbl_name = "wb_health_population"
     database = superset.utils.database.get_example_database()
     with database.get_sqla_engine_with_context() as engine:
+
         schema = inspect(engine).default_schema_name
         table_exists = database.has_table_by_name(tbl_name)
 
@@ -85,7 +89,6 @@ def load_world_bank_health_n_pop(  # pylint: disable=too-many-locals, too-many-s
     tbl = db.session.query(table).filter_by(table_name=tbl_name).first()
     if not tbl:
         tbl = table(table_name=tbl_name, schema=schema)
-        db.session.add(tbl)
     tbl.description = utils.readfile(
         os.path.join(get_examples_folder(), "countries.md")
     )
@@ -109,6 +112,7 @@ def load_world_bank_health_n_pop(  # pylint: disable=too-many-locals, too-many-s
                 SqlMetric(metric_name=metric, expression=f"{aggr_func}({col})")
             )
 
+    db.session.merge(tbl)
     db.session.commit()
     tbl.fetch_metadata()
 
@@ -124,7 +128,6 @@ def load_world_bank_health_n_pop(  # pylint: disable=too-many-locals, too-many-s
 
     if not dash:
         dash = Dashboard()
-        db.session.add(dash)
     dash.published = True
     pos = dashboard_positions
     slices = update_slice_ids(pos)
@@ -133,10 +136,11 @@ def load_world_bank_health_n_pop(  # pylint: disable=too-many-locals, too-many-s
     dash.position_json = json.dumps(pos, indent=4)
     dash.slug = slug
     dash.slices = slices
+    db.session.merge(dash)
     db.session.commit()
 
 
-def create_slices(tbl: BaseDatasource) -> list[Slice]:
+def create_slices(tbl: BaseDatasource) -> List[Slice]:
     metric = "sum__SP_POP_TOTL"
     metrics = ["sum__SP_POP_TOTL"]
     secondary_metric = {
@@ -167,6 +171,35 @@ def create_slices(tbl: BaseDatasource) -> list[Slice]:
     }
 
     return [
+        Slice(
+            slice_name="Region Filter",
+            viz_type="filter_box",
+            datasource_type=DatasourceType.TABLE,
+            datasource_id=tbl.id,
+            params=get_slice_json(
+                defaults,
+                viz_type="filter_box",
+                date_filter=False,
+                filter_configs=[
+                    {
+                        "asc": False,
+                        "clearable": True,
+                        "column": "region",
+                        "key": "2s98dfu",
+                        "metric": "sum__SP_POP_TOTL",
+                        "multiple": False,
+                    },
+                    {
+                        "asc": False,
+                        "clearable": True,
+                        "key": "li3j2lk",
+                        "column": "country_name",
+                        "metric": "sum__SP_POP_TOTL",
+                        "multiple": True,
+                    },
+                ],
+            ),
+        ),
         Slice(
             slice_name="World's Population",
             viz_type="big_number",
@@ -266,13 +299,13 @@ def create_slices(tbl: BaseDatasource) -> list[Slice]:
         ),
         Slice(
             slice_name="Rural Breakdown",
-            viz_type="sunburst_v2",
+            viz_type="sunburst",
             datasource_type=DatasourceType.TABLE,
             datasource_id=tbl.id,
             params=get_slice_json(
                 defaults,
-                viz_type="sunburst_v2",
-                columns=["region", "country_name"],
+                viz_type="sunburst",
+                groupby=["region", "country_name"],
                 since="2011-01-01",
                 until="2011-01-02",
                 metric=metric,
@@ -311,15 +344,15 @@ def create_slices(tbl: BaseDatasource) -> list[Slice]:
         ),
         Slice(
             slice_name="Treemap",
-            viz_type="treemap_v2",
+            viz_type="treemap",
             datasource_type=DatasourceType.TABLE,
             datasource_id=tbl.id,
             params=get_slice_json(
                 defaults,
                 since="1960-01-01",
                 until="now",
-                viz_type="treemap_v2",
-                metric="sum__SP_POP_TOTL",
+                viz_type="treemap",
+                metrics=["sum__SP_POP_TOTL"],
                 groupby=["region", "country_code"],
             ),
         ),
@@ -343,12 +376,18 @@ def create_slices(tbl: BaseDatasource) -> list[Slice]:
 
 
 dashboard_positions = {
+    "CHART-36bfc934": {
+        "children": [],
+        "id": "CHART-36bfc934",
+        "meta": {"chartId": 40, "height": 25, "sliceName": "Region Filter", "width": 2},
+        "type": "CHART",
+    },
     "CHART-37982887": {
         "children": [],
         "id": "CHART-37982887",
         "meta": {
             "chartId": 41,
-            "height": 52,
+            "height": 25,
             "sliceName": "World's Population",
             "width": 2,
         },
@@ -429,7 +468,7 @@ dashboard_positions = {
         "type": "COLUMN",
     },
     "COLUMN-fe3914b8": {
-        "children": ["CHART-37982887"],
+        "children": ["CHART-36bfc934", "CHART-37982887"],
         "id": "COLUMN-fe3914b8",
         "meta": {"background": "BACKGROUND_TRANSPARENT", "width": 2},
         "type": "COLUMN",

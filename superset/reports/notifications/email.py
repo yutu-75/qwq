@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,14 +15,26 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
+# ------------------------------------------------------------------
+# File Name:        email.py
+# Author:           王邦权
+# Version:          email-001
+# Created:          2023/6/15
+# Rows:             154
+# Description:      重写 _get_content 添加 pdf data
+#                   保留原有 _get_content 重命名为 _get_content_old
+# ------------------------------------------------------------------
+
 import json
 import logging
 import textwrap
 from dataclasses import dataclass
+from datetime import datetime
 from email.utils import make_msgid, parseaddr
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
-import nh3
+import bleach
 from flask_babel import gettext as __
 
 from superset import app
@@ -34,10 +47,10 @@ from superset.utils.decorators import statsd_gauge
 
 logger = logging.getLogger(__name__)
 
-TABLE_TAGS = {"table", "th", "tr", "td", "thead", "tbody", "tfoot"}
-TABLE_ATTRIBUTES = {"colspan", "rowspan", "halign", "border", "class"}
+TABLE_TAGS = ["table", "th", "tr", "td", "thead", "tbody", "tfoot"]
+TABLE_ATTRIBUTES = ["colspan", "rowspan", "halign", "border", "class"]
 
-ALLOWED_TAGS = {
+ALLOWED_TAGS = [
     "a",
     "abbr",
     "acronym",
@@ -53,14 +66,13 @@ ALLOWED_TAGS = {
     "p",
     "strong",
     "ul",
-}.union(TABLE_TAGS)
+] + TABLE_TAGS
 
-ALLOWED_TABLE_ATTRIBUTES = {tag: TABLE_ATTRIBUTES for tag in TABLE_TAGS}
 ALLOWED_ATTRIBUTES = {
-    "a": {"href", "title"},
-    "abbr": {"title"},
-    "acronym": {"title"},
-    **ALLOWED_TABLE_ATTRIBUTES,
+    "a": ["href", "title"],
+    "abbr": ["title"],
+    "acronym": ["title"],
+    **{tag: TABLE_ATTRIBUTES for tag in TABLE_TAGS},
 }
 
 
@@ -68,8 +80,8 @@ ALLOWED_ATTRIBUTES = {
 class EmailContent:
     body: str
     header_data: Optional[HeaderDataType] = None
-    data: Optional[dict[str, Any]] = None
-    images: Optional[dict[str, bytes]] = None
+    data: Optional[Dict[str, Any]] = None
+    images: Optional[Dict[str, bytes]] = None
 
 
 class EmailNotification(BaseNotification):  # pylint: disable=too-few-public-methods
@@ -92,12 +104,93 @@ class EmailNotification(BaseNotification):  # pylint: disable=too-few-public-met
             text=text,
         )
 
+    # def _get_content_old(self) -> EmailContent:
+    #     if self._content.text:
+    #         return EmailContent(body=self._error_template(self._content.text))
+    #     # Get the domain from the 'From' address ..
+    #     # and make a message id without the < > in the end
+    #     csv_data = None
+    #     domain = self._get_smtp_domain()
+    #     images = {}
+    #
+    #     if self._content.screenshots:
+    #         images = {
+    #             make_msgid(domain)[1:-1]: screenshot
+    #             for screenshot in self._content.screenshots
+    #         }
+    #
+    #     # Strip any malicious HTML from the description
+    #     description = bleach.clean(
+    #         self._content.description or "",
+    #         tags=ALLOWED_TAGS,
+    #         attributes=ALLOWED_ATTRIBUTES,
+    #     )
+    #
+    #     # Strip malicious HTML from embedded data, allowing only table elements
+    #     if self._content.embedded_data is not None:
+    #         df = self._content.embedded_data
+    #         html_table = bleach.clean(
+    #             df.to_html(na_rep="", index=True, escape=True),
+    #             # pandas will escape the HTML in cells already, so passing
+    #             # more allowed tags here will not work
+    #             tags=TABLE_TAGS,
+    #             attributes=TABLE_ATTRIBUTES,
+    #         )
+    #     else:
+    #         html_table = ""
+    #
+    #     call_to_action = __(app.config["EMAIL_REPORTS_CTA"])
+    #     img_tags = []
+    #     for msgid in images.keys():
+    #         img_tags.append(
+    #             f"""<div class="image">
+    #                 <img width="1000px" src="cid:{msgid}">
+    #             </div>
+    #             """
+    #         )
+    #     img_tag = "".join(img_tags)
+    #     body = textwrap.dedent(
+    #         f"""
+    #         <html>
+    #           <head>
+    #             <style type="text/css">
+    #               table, th, td {{
+    #                 border-collapse: collapse;
+    #                 border-color: rgb(200, 212, 227);
+    #                 color: rgb(42, 63, 95);
+    #                 padding: 4px 8px;
+    #               }}
+    #               .image{{
+    #                   margin-bottom: 18px;
+    #               }}
+    #             </style>
+    #           </head>
+    #           <body>
+    #             <div>{description}</div>
+    #             <br>
+    #             <b><a href="{self._content.url}">{call_to_action}</a></b><p></p>
+    #             {html_table}
+    #             {img_tag}
+    #           </body>
+    #         </html>
+    #         """
+    #     )
+    #
+    #     if self._content.csv:
+    #         csv_data = {__("%(name)s.csv", name=self._content.name): self._content.csv}
+    #     return EmailContent(
+    #         body=body,
+    #         images=images,
+    #         data=csv_data,
+    #         header_data=self._content.header_data,
+    #     )
+
     def _get_content(self) -> EmailContent:
         if self._content.text:
             return EmailContent(body=self._error_template(self._content.text))
         # Get the domain from the 'From' address ..
         # and make a message id without the < > in the end
-        csv_data = None
+        file_data = None
         domain = self._get_smtp_domain()
         images = {}
 
@@ -108,8 +201,7 @@ class EmailNotification(BaseNotification):  # pylint: disable=too-few-public-met
             }
 
         # Strip any malicious HTML from the description
-        # pylint: disable=no-member
-        description = nh3.clean(
+        description = bleach.clean(
             self._content.description or "",
             tags=ALLOWED_TAGS,
             attributes=ALLOWED_ATTRIBUTES,
@@ -118,13 +210,12 @@ class EmailNotification(BaseNotification):  # pylint: disable=too-few-public-met
         # Strip malicious HTML from embedded data, allowing only table elements
         if self._content.embedded_data is not None:
             df = self._content.embedded_data
-            # pylint: disable=no-member
-            html_table = nh3.clean(
+            html_table = bleach.clean(
                 df.to_html(na_rep="", index=True, escape=True),
                 # pandas will escape the HTML in cells already, so passing
                 # more allowed tags here will not work
                 tags=TABLE_TAGS,
-                attributes=ALLOWED_TABLE_ATTRIBUTES,
+                attributes=TABLE_ATTRIBUTES,
             )
         else:
             html_table = ""
@@ -166,12 +257,16 @@ class EmailNotification(BaseNotification):  # pylint: disable=too-few-public-met
             """
         )
 
+        # csv
         if self._content.csv:
-            csv_data = {__("%(name)s.csv", name=self._content.name): self._content.csv}
+            file_data = {__("%(name)s.csv", name=self._content.name): self._content.csv}
+        # pdf
+        if self._content.pdf:
+            file_data = {__("%(name)s.pdf", name=datetime.now().strftime("%Y%m%d_%H%M%S")): self._content.pdf}
         return EmailContent(
             body=body,
             images=images,
-            data=csv_data,
+            data=file_data,
             header_data=self._content.header_data,
         )
 

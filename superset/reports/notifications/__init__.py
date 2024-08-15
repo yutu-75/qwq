@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,10 +15,16 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+import logging
+
 from superset.reports.models import ReportRecipients
 from superset.reports.notifications.base import BaseNotification, NotificationContent
 from superset.reports.notifications.email import EmailNotification
 from superset.reports.notifications.slack import SlackNotification
+from superset.reports.notifications.ichangan import IChangAnNotification
+from superset.reports.notifications.wecom import WecomNotification
+
+logger = logging.getLogger(__name__)
 
 
 def create_notification(
@@ -30,6 +37,4 @@ def create_notification(
     for plugin in BaseNotification.plugins:
         if plugin.type == recipient.type:
             return plugin(recipient, notification_content)
-    raise Exception(  # pylint: disable=broad-exception-raised
-        "Recipient type not supported"
-    )
+    raise Exception("Recipient type not supported")

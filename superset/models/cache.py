@@ -26,7 +26,7 @@ class CacheKey(Model):  # pylint: disable=too-few-public-methods
 
     __tablename__ = "cache_keys"
     id = Column(Integer, primary_key=True)
-    cache_key = Column(String(256), nullable=False)
-    cache_timeout = Column(Integer, nullable=True)
-    datasource_uid = Column(String(64), nullable=False, index=True)
-    created_on = Column(DateTime, default=datetime.now, nullable=True)
+    cache_key = Column(String(256), nullable=False, comment='缓存键')
+    cache_timeout = Column(Integer, nullable=True, comment='过期时间')
+    datasource_uid = Column(String(64), nullable=False, index=True, comment='数据源 uid')
+    created_on = Column(DateTime, default=datetime.now, nullable=True, comment='创建时间')

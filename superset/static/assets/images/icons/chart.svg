@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+    <g transform="translate(-8271 -6057)">
+        <path fill="none" d="M0,0H20V20H0Z" transform="translate(8271 6057)" />
+        <path fill="currentColor"
+            d="M2.8,3H17.2a.8.8,0,0,1,.8.8V16.6a.8.8,0,0,1-.8.8H2.8a.8.8,0,0,1-.8-.8V3.8A.8.8,0,0,1,2.8,3Zm.8,1.6V15.8H16.4V4.6ZM6,11H7.6v3.2H6ZM9.2,6.2h1.6v8H9.2Zm3.2,2.4H14v5.6H12.4Z"
+            transform="translate(8271 6059)" />
+    </g>
+</svg>

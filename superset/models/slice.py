@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, TYPE_CHECKING
+from typing import Any, Dict, Optional, Type, TYPE_CHECKING
 from urllib import parse
 
 import sqlalchemy as sqla
@@ -35,11 +35,13 @@ from sqlalchemy import (
     Table,
     Text,
 )
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.engine.base import Connection
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from sqlalchemy.orm.mapper import Mapper
 
-from superset import db, is_feature_enabled, security_manager
+from superset import db, is_feature_enabled, security_manager, conf
+from superset.constants import AuthSourceType
 from superset.legacy import update_time_range
 from superset.models.helpers import AuditMixinNullable, ImportExportMixin
 from superset.tasks.thumbnails import cache_chart_thumbnail
@@ -51,7 +53,7 @@ from superset.viz import BaseViz, viz_types
 if TYPE_CHECKING:
     from superset.common.query_context import QueryContext
     from superset.common.query_context_factory import QueryContextFactory
-    from superset.connectors.sqla.models import BaseDatasource
+    from superset.connectors.base.models import BaseDatasource
 
 metadata = Model.metadata  # pylint: disable=no-member
 slice_user = Table(
@@ -69,49 +71,42 @@ class Slice(  # pylint: disable=too-many-public-methods
 ):
     """A slice is essentially a report or a view on data"""
 
-    query_context_factory: QueryContextFactory | None = None
+    query_context_factory: Optional[QueryContextFactory] = None
 
     __tablename__ = "slices"
     id = Column(Integer, primary_key=True)
-    slice_name = Column(String(250))
-    datasource_id = Column(Integer)
-    datasource_type = Column(String(200))
-    datasource_name = Column(String(2000))
-    viz_type = Column(String(250))
-    params = Column(utils.MediumText())
-    query_context = Column(utils.MediumText())
-    description = Column(Text)
-    cache_timeout = Column(Integer)
-    perm = Column(String(1000))
-    schema_perm = Column(String(1000))
+    slice_name = Column(String(250), comment="图表名称")
+    datasource_id = Column(Integer, comment="数据源ID")
+    datasource_type = Column(String(200), comment="数据源类型")
+    datasource_name = Column(String(2000), comment="数据源名称")
+    viz_type = Column(String(250), comment="图表类型")
+    params = Column(LONGTEXT, comment="参数")
+    query_context = Column(LONGTEXT, comment="查询过滤信息")
+    description = Column(Text, comment="说明")
+    cache_timeout = Column(Integer, comment="缓存过期时间")
+    perm = Column(String(1000), comment="旧版权限")
+    schema_perm = Column(String(1000), comment="旧版数据源权限")
     # the last time a user has saved the chart, changed_on is referencing
     # when the database row was last written
-    last_saved_at = Column(DateTime, nullable=True)
-    last_saved_by_fk = Column(Integer, ForeignKey("ab_user.id"), nullable=True)
+    last_saved_at = Column(DateTime, nullable=True, comment="最后一次保存")
+    last_saved_by_fk = Column(Integer, ForeignKey("ab_user.id"), nullable=True, comment="最后一次保存折")
     certified_by = Column(Text)
     certification_details = Column(Text)
     is_managed_externally = Column(Boolean, nullable=False, default=False)
     external_url = Column(Text, nullable=True)
+    slice_group_id = Column(Integer, ForeignKey("slice_group.id"), default=1, comment="分组ID")
+    slice_group = relationship(
+        "SliceGroup",
+        backref=backref("slices", cascade="all, delete-orphan")
+    )
     last_saved_by = relationship(
         security_manager.user_model, foreign_keys=[last_saved_by_fk]
     )
-    owners = relationship(
-        security_manager.user_model,
-        secondary=slice_user,
-        passive_deletes=True,
-    )
-    tags = relationship(
-        "Tag",
-        secondary="tagged_object",
-        overlaps="objects,tag,tags",
-        primaryjoin="and_(Slice.id == TaggedObject.object_id)",
-        secondaryjoin="and_(TaggedObject.tag_id == Tag.id, "
-        "TaggedObject.object_type == 'chart')",
-    )
+    owners = relationship(security_manager.user_model, secondary=slice_user)
     table = relationship(
         "SqlaTable",
         foreign_keys=[datasource_id],
-        overlaps="table",
+        back_populates="slices",
         primaryjoin="and_(Slice.datasource_id == SqlaTable.id, "
         "Slice.datasource_type == 'table')",
         remote_side="SqlaTable.id",
@@ -131,6 +126,7 @@ class Slice(  # pylint: disable=too-many-public-methods
         "params",
         "query_context",
         "cache_timeout",
+        "slice_group_id",
     ]
     export_parent = "table"
     extra_import_fields = ["is_managed_externally", "external_url"]
@@ -138,18 +134,34 @@ class Slice(  # pylint: disable=too-many-public-methods
     def __repr__(self) -> str:
         return self.slice_name or str(self.id)
 
+    def add_user_permission(self, privilege_value: int = 1):
+        """新增用户权限，在新增数据时调用"""
+        self._add_user_permission(
+            auth_source=self.id,
+            auth_source_type=AuthSourceType.CHART,
+            privilege_value=privilege_value,
+        )
+
+    def can_access(self, privilege_value: int = 1):
+        """验证当前用户是否有权限"""
+        self._can_access(
+            auth_source=self.id,
+            auth_source_type=AuthSourceType.CHART,
+            privilege_value=privilege_value,
+        )
+
     @property
-    def cls_model(self) -> type[BaseDatasource]:
+    def cls_model(self) -> Type["BaseDatasource"]:
         # pylint: disable=import-outside-toplevel
-        from superset.daos.datasource import DatasourceDAO
+        from superset.datasource.dao import DatasourceDAO
 
         return DatasourceDAO.sources[self.datasource_type]
 
     @property
-    def datasource(self) -> BaseDatasource | None:
+    def datasource(self) -> Optional["BaseDatasource"]:
         return self.get_datasource
 
-    def clone(self) -> Slice:
+    def clone(self) -> "Slice":
         return Slice(
             slice_name=self.slice_name,
             datasource_id=self.datasource_id,
@@ -159,11 +171,13 @@ class Slice(  # pylint: disable=too-many-public-methods
             params=self.params,
             description=self.description,
             cache_timeout=self.cache_timeout,
+            slice_group_id=self.slice_group_id,
+            query_context=self.query_context,
         )
 
     # pylint: disable=using-constant-test
     @datasource.getter  # type: ignore
-    def get_datasource(self) -> BaseDatasource | None:
+    def get_datasource(self) -> Optional["BaseDatasource"]:
         return (
             db.session.query(self.cls_model)
             .filter_by(id=self.datasource_id)
@@ -171,20 +185,20 @@ class Slice(  # pylint: disable=too-many-public-methods
         )
 
     @renders("datasource_name")
-    def datasource_link(self) -> Markup | None:
+    def datasource_link(self) -> Optional[Markup]:
         # pylint: disable=no-member
         datasource = self.datasource
         return datasource.link if datasource else None
 
     @renders("datasource_url")
-    def datasource_url(self) -> str | None:
+    def datasource_url(self) -> Optional[str]:
         # pylint: disable=no-member
         if self.table:
             return self.table.explore_url
         datasource = self.datasource
         return datasource.explore_url if datasource else None
 
-    def datasource_name_text(self) -> str | None:
+    def datasource_name_text(self) -> Optional[str]:
         # pylint: disable=no-member
         if self.table:
             if self.table.schema:
@@ -197,7 +211,7 @@ class Slice(  # pylint: disable=too-many-public-methods
         return None
 
     @property
-    def datasource_edit_url(self) -> str | None:
+    def datasource_edit_url(self) -> Optional[str]:
         # pylint: disable=no-member
         datasource = self.datasource
         return datasource.url if datasource else None
@@ -205,7 +219,7 @@ class Slice(  # pylint: disable=too-many-public-methods
     # pylint: enable=using-constant-test
 
     @property
-    def viz(self) -> BaseViz | None:
+    def viz(self) -> Optional[BaseViz]:
         form_data = json.loads(self.params)
         viz_class = viz_types.get(self.viz_type)
         datasource = self.datasource
@@ -218,9 +232,9 @@ class Slice(  # pylint: disable=too-many-public-methods
         return utils.markdown(self.description)
 
     @property
-    def data(self) -> dict[str, Any]:
+    def data(self) -> Dict[str, Any]:
         """Data used to render slice in templates"""
-        data: dict[str, Any] = {}
+        data: Dict[str, Any] = {}
         self.token = ""
         try:
             viz = self.viz
@@ -247,6 +261,29 @@ class Slice(  # pylint: disable=too-many-public-methods
             "certified_by": self.certified_by,
             "certification_details": self.certification_details,
             "is_managed_externally": self.is_managed_externally,
+            "datasource_url": self.datasource_url(),
+            "thumbnail_url": self.thumbnail_url,
+        }
+
+    @property
+    def info(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "cache_timeout": self.cache_timeout,
+            "changed_on": self.changed_on.isoformat(),
+            "changed_on_humanized": self.changed_on_humanized,
+            "datasource": self.datasource_name,
+            "description": self.description,
+            "description_markeddown": self.description_markeddown,
+            "edit_url": self.edit_url,
+            "form_data": self.form_data,
+            "modified": self.modified(),
+            "slice_id": self.id,
+            "slice_name": self.slice_name,
+            "slice_url": self.slice_url,
+            "certified_by": self.certified_by,
+            "certification_details": self.certification_details,
+            "is_managed_externally": self.is_managed_externally,
         }
 
     @property
@@ -259,15 +296,16 @@ class Slice(  # pylint: disable=too-many-public-methods
         Returns a thumbnail URL with a HEX digest. We want to avoid browser cache
         if the dashboard has changed
         """
-        return f"/api/v1/chart/{self.id}/thumbnail/{self.digest}/"
+        from superset import conf
+        return f"{conf['STATIC_ASSETS_PREFIX']}/api/v1/chart/{self.id}/thumbnail/{self.digest}/"
 
     @property
     def json_data(self) -> str:
         return json.dumps(self.data)
 
     @property
-    def form_data(self) -> dict[str, Any]:
-        form_data: dict[str, Any] = {}
+    def form_data(self) -> Dict[str, Any]:
+        form_data: Dict[str, Any] = {}
         try:
             form_data = json.loads(self.params)
         except Exception as ex:  # pylint: disable=broad-except
@@ -277,7 +315,7 @@ class Slice(  # pylint: disable=too-many-public-methods
             {
                 "slice_id": self.id,
                 "viz_type": self.viz_type,
-                "datasource": f"{self.datasource_id}__{self.datasource_type}",
+                "datasource": "{}__{}".format(self.datasource_id, self.datasource_type),
             }
         )
 
@@ -286,7 +324,7 @@ class Slice(  # pylint: disable=too-many-public-methods
         update_time_range(form_data)
         return form_data
 
-    def get_query_context(self) -> QueryContext | None:
+    def get_query_context(self) -> Optional[QueryContext]:
         if self.query_context:
             try:
                 return self.get_query_context_factory().create(
@@ -300,13 +338,13 @@ class Slice(  # pylint: disable=too-many-public-methods
     def get_explore_url(
         self,
         base_url: str = "/explore",
-        overrides: dict[str, Any] | None = None,
+        overrides: Optional[Dict[str, Any]] = None,
     ) -> str:
         return self.build_explore_url(self.id, base_url, overrides)
 
     @staticmethod
     def build_explore_url(
-        id_: int, base_url: str = "/explore", overrides: dict[str, Any] | None = None
+        id_: int, base_url: str = "/explore", overrides: Optional[Dict[str, Any]] = None
     ) -> str:
         overrides = overrides or {}
         form_data = {"slice_id": id_}
@@ -326,7 +364,7 @@ class Slice(  # pylint: disable=too-many-public-methods
 
     @property
     def edit_url(self) -> str:
-        return f"/chart/edit/{self.id}"
+        return f"{conf['STATIC_ASSETS_PREFIX']}/chart/edit/{self.id}"
 
     @property
     def chart(self) -> str:
@@ -336,6 +374,10 @@ class Slice(  # pylint: disable=too-many-public-methods
     def slice_link(self) -> Markup:
         name = escape(self.chart)
         return Markup(f'<a href="{self.url}">{name}</a>')
+
+    @property
+    def changed_by_url(self) -> str:
+        return f"{conf['STATIC_ASSETS_PREFIX']}/superset/profile/{self.changed_by.username}"  # type: ignore
 
     @property
     def icons(self) -> str:
@@ -368,7 +410,8 @@ class Slice(  # pylint: disable=too-many-public-methods
 
 def set_related_perm(_mapper: Mapper, _connection: Connection, target: Slice) -> None:
     src_class = target.cls_model
-    if id_ := target.datasource_id:
+    id_ = target.datasource_id
+    if id_:
         ds = db.session.query(src_class).filter_by(id=int(id_)).first()
         if ds:
             target.perm = ds.perm
@@ -391,3 +434,34 @@ sqla.event.listen(Slice, "before_update", set_related_perm)
 if is_feature_enabled("THUMBNAILS_SQLA_LISTENERS"):
     sqla.event.listen(Slice, "after_insert", event_after_chart_changed)
     sqla.event.listen(Slice, "after_update", event_after_chart_changed)
+
+
+class SliceGroup(Model, AuditMixinNullable):
+    """The slice group!"""
+
+    __tablename__ = "slice_group"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255), nullable=False, comment="分组名称")
+    pid = Column(Integer, nullable=False, default=0, index=True, comment="父分组ID")
+    level = Column(Integer, nullable=False, default=0, comment="分组等级")
+
+    def __repr__(self) -> str:
+        return f"<SliceGroup id={self.id} name={self.name}"
+
+    def add_user_permission(self, privilege_value: int = 1):
+        """新增用户权限，在新增数据时调用"""
+        self._add_user_permission(
+            auth_source=self.id,
+            auth_source_type=AuthSourceType.CHART_GROUP,
+            privilege_value=privilege_value,
+        )
+
+    def can_access(self, privilege_value: int = 1):
+        """验证当前用户是否有权限"""
+        self._can_access(
+            auth_source=self.id,
+            auth_source_type=AuthSourceType.CHART_GROUP,
+            privilege_value=privilege_value,
+        )
+

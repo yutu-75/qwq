@@ -18,8 +18,8 @@ from __future__ import annotations
 
 from hashlib import md5
 from secrets import token_urlsafe
-from typing import Any
-from uuid import UUID, uuid3
+from typing import Any, Union
+from uuid import UUID, uuid3, uuid4
 
 import hashids
 from flask_babel import gettext as _
@@ -35,7 +35,7 @@ def random_key() -> str:
     return token_urlsafe(48)
 
 
-def get_filter(resource: KeyValueResource, key: int | UUID) -> KeyValueFilter:
+def get_filter(resource: KeyValueResource, key: Union[int, UUID]) -> KeyValueFilter:
     try:
         filter_: KeyValueFilter = {"resource": resource.value}
         if isinstance(key, UUID):
@@ -70,3 +70,7 @@ def get_deterministic_uuid(namespace: str, payload: Any) -> UUID:
     """Get a deterministic UUID (uuid3) from a salt and a JSON-serializable payload."""
     payload_str = json_dumps_w_dates(payload, sort_keys=True)
     return uuid3(get_uuid_namespace(namespace), payload_str)
+
+
+def get_new_uuid():
+    return str(uuid4())

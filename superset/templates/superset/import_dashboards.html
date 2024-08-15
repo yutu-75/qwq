@@ -32,7 +32,10 @@
           name="csrf_token"
           id="csrf_token"
           value="{{ csrf_token() if csrf_token else '' }}" />
-          <table class="table table-bordered">
+          <table class="table table-bordered" summary="nothing">
+            <thead class="test-1" style="display: none">
+              <th id="test-2"></th>
+            </thead>
             <tr>
               <td>{{ _("File") }}</td>
               <td>

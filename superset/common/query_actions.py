@@ -17,14 +17,16 @@
 from __future__ import annotations
 
 import copy
-from typing import Any, Callable, TYPE_CHECKING
+import logging
+import re
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 from flask_babel import _
 
 from superset import app
 from superset.common.chart_data import ChartDataResultType
 from superset.common.db_query_status import QueryStatus
-from superset.connectors.sqla.models import BaseDatasource
+from superset.connectors.base.models import BaseDatasource
 from superset.exceptions import QueryObjectValidationError
 from superset.utils.core import (
     extract_column_dtype,
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
     from superset.common.query_object import QueryObject
 
 config = app.config
+logger = logging.getLogger(__name__)
 
 
 def _get_datasource(
@@ -49,7 +52,7 @@ def _get_datasource(
 
 def _get_columns(
     query_context: QueryContext, query_obj: QueryObject, _: bool
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     datasource = _get_datasource(query_context, query_obj)
     return {
         "data": [
@@ -65,7 +68,7 @@ def _get_columns(
 
 def _get_timegrains(
     query_context: QueryContext, query_obj: QueryObject, _: bool
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     datasource = _get_datasource(query_context, query_obj)
     return {
         "data": [
@@ -83,7 +86,7 @@ def _get_query(
     query_context: QueryContext,
     query_obj: QueryObject,
     _: bool,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     datasource = _get_datasource(query_context, query_obj)
     result = {"language": datasource.query_language}
     try:
@@ -93,15 +96,30 @@ def _get_query(
     return result
 
 
+def _data_masking(datasource, df):
+    for col in datasource.columns:
+        if col.mask_status == 1 and col.pattern and col.repl:
+            pat = re.compile(r'{}'.format(col.pattern))
+            repl = r'{}'.format(col.repl)
+            df[col.column_name] = df[col.column_name].astype(str).replace(
+                pat, repl, regex=True)
+
+    return df
+
+
 def _get_full(
     query_context: QueryContext,
     query_obj: QueryObject,
-    force_cached: bool | None = False,
-) -> dict[str, Any]:
+    force_cached: Optional[bool] = False,
+) -> Dict[str, Any]:
     datasource = _get_datasource(query_context, query_obj)
     result_type = query_obj.result_type or query_context.result_type
     payload = query_context.get_df_payload(query_obj, force_cached=force_cached)
-    df = payload["df"]
+    try:
+        df = _data_masking(datasource, payload["df"])  # 数据脱敏
+    except Exception as ex:
+        logger.error(ex)
+
     status = payload["status"]
     if status != QueryStatus.FAILED:
         payload["colnames"] = list(df.columns)
@@ -135,15 +153,13 @@ def _get_full(
             "data": payload.get("data"),
             "colnames": payload.get("colnames"),
             "coltypes": payload.get("coltypes"),
-            "rowcount": payload.get("rowcount"),
-            "sql_rowcount": payload.get("sql_rowcount"),
         }
     return payload
 
 
 def _get_samples(
     query_context: QueryContext, query_obj: QueryObject, force_cached: bool = False
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     datasource = _get_datasource(query_context, query_obj)
     query_obj = copy.copy(query_obj)
     query_obj.is_timeseries = False
@@ -164,7 +180,7 @@ def _get_samples(
 
 def _get_drill_detail(
     query_context: QueryContext, query_obj: QueryObject, force_cached: bool = False
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     # todo(yongjie): Remove this function,
     #  when determining whether samples should be applied to the time filter.
     datasource = _get_datasource(query_context, query_obj)
@@ -185,13 +201,13 @@ def _get_drill_detail(
 
 def _get_results(
     query_context: QueryContext, query_obj: QueryObject, force_cached: bool = False
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     payload = _get_full(query_context, query_obj, force_cached)
     return payload
 
 
-_result_type_functions: dict[
-    ChartDataResultType, Callable[[QueryContext, QueryObject, bool], dict[str, Any]]
+_result_type_functions: Dict[
+    ChartDataResultType, Callable[[QueryContext, QueryObject, bool], Dict[str, Any]]
 ] = {
     ChartDataResultType.COLUMNS: _get_columns,
     ChartDataResultType.TIMEGRAINS: _get_timegrains,
@@ -212,7 +228,7 @@ def get_query_results(
     query_context: QueryContext,
     query_obj: QueryObject,
     force_cached: bool,
-) -> dict[str, Any]:
+) -> Dict[str, Any]:
     """
     Return result payload for a chart data request.
 
@@ -223,7 +239,8 @@ def get_query_results(
     :raises QueryObjectValidationError: if an unsupported result type is requested
     :return: JSON serializable result payload
     """
-    if result_func := _result_type_functions.get(result_type):
+    result_func = _result_type_functions.get(result_type)
+    if result_func:
         return result_func(query_context, query_obj, force_cached)
     raise QueryObjectValidationError(
         _("Invalid result type: %(result_type)s", result_type=result_type)

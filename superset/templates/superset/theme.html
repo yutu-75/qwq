@@ -17,7 +17,6 @@
   under the License.
 #}
 {% extends "superset/basic.html" %}
-{% import "superset/macros.html" as macros %}
 
 {% block body %}
   <body>
@@ -445,13 +444,13 @@
         </div>
         <div class="row">
           <div class="col-md-6">
-            <table class="table">
+            <table class="table" summary="nothing">
               <thead>
                 <tr>
-                  <th>#</th>
-                  <th>First Name</th>
-                  <th>Last Name</th>
-                  <th>Username</th>
+                  <th scope="col">#</th>
+                  <th scope="col">First Name</th>
+                  <th scope="col">Last Name</th>
+                  <th scope="col">Username</th>
                 </tr>
               </thead>
               <tbody>
@@ -477,13 +476,13 @@
             </table>
           </div>
           <div class="col-md-6">
-            <table class="table table-striped">
+            <table class="table table-striped" summary="nothing">
               <thead>
                 <tr>
-                  <th>#</th>
-                  <th>First Name</th>
-                  <th>Last Name</th>
-                  <th>Username</th>
+                  <th scope="col">#</th>
+                  <th scope="col"First Name</th>
+                  <th scope="col">Last Name</th>
+                  <th scope="col">Username</th>
                 </tr>
               </thead>
               <tbody>
@@ -512,13 +511,13 @@
         <br /><br />
         <div class="row">
           <div class="col-md-6">
-            <table class="table table-bordered">
+            <table class="table table-bordered" summary="nothing">
               <thead>
                 <tr>
-                  <th>#</th>
-                  <th>First Name</th>
-                  <th>Last Name</th>
-                  <th>Username</th>
+                  <th scope="col">#</th>
+                  <th scope="col">First Name</th>
+                  <th scope="col">Last Name</th>
+                  <th scope="col">Username</th>
                 </tr>
               </thead>
               <tbody>
@@ -548,13 +547,13 @@
             </table>
           </div>
           <div class="col-md-6">
-            <table class="table table-condensed">
+            <table class="table table-condensed" summary="nothing">
               <thead>
                 <tr>
-                  <th>#</th>
-                  <th>First Name</th>
-                  <th>Last Name</th>
-                  <th>Username</th>
+                  <th scope="col">#</th>
+                  <th scope="col">First Name</th>
+                  <th scope="col">Last Name</th>
+                  <th scope="col">Username</th>
                 </tr>
               </thead>
               <tbody>
@@ -1341,15 +1340,7 @@
 {% endblock %}
 {% block tail_js %}
   {{ super() }}
-  <script
-    src="https://code.jquery.com/jquery-1.10.2.min.js"
-    integrity="sha256-C6CB9UYIS9UJeqinPHWTHVqh/E1uhG5Twh+Y5qFQmYg="
-    crossorigin="anonymous"
-    nonce="{{ macros.get_nonce() }}"></script>
-  <script
-    src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"
-    integrity="sha384-Tc5IQib027qvyjSMfHjOMaLkfuWVxZxUPnCJA7l2mCWNIpG9mGCD8wGNIcPD7Txa"
-    crossorigin="anonymous"
-    nonce="{{ macros.get_nonce() }}"></script>
-  <script src="{{ assets_prefix }}/static/assets/stylesheets/less/cosmo/cosmoTheme.js" nonce="{{ macros.get_nonce() }}"></script>
+  <script src="https://code.jquery.com/jquery-1.10.2.min.js"></script>
+  <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+  <script src="{{ assets_prefix }}/static/assets/stylesheets/less/cosmo/cosmoTheme.js"></script>
 {% endblock %}

@@ -15,36 +15,43 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from collections.abc import Iterator
 from datetime import datetime, timezone
+from typing import Iterator, List, Tuple, Type
 
 import yaml
 from flask_appbuilder import Model
 
 from superset.commands.base import BaseCommand
 from superset.commands.exceptions import CommandException
-from superset.daos.base import BaseDAO
+from superset.dao.base import BaseDAO
 from superset.utils.dict_import_export import EXPORT_VERSION
 
 METADATA_FILE_NAME = "metadata.yaml"
 
 
 class ExportModelsCommand(BaseCommand):
-    dao: type[BaseDAO[Model]] = BaseDAO
-    not_found: type[CommandException] = CommandException
 
-    def __init__(self, model_ids: list[int], export_related: bool = True):
+    dao: Type[BaseDAO] = BaseDAO
+    not_found: Type[CommandException] = CommandException
+
+    def __init__(
+        self,
+        model_ids: List[int],
+        export_related: bool = True,
+        datasource_id: int = None
+    ):
         self.model_ids = model_ids
         self.export_related = export_related
 
         # this will be set when calling validate()
-        self._models: list[Model] = []
+        self._models: List[Model] = []
+        self._datasource_id = datasource_id
 
     @staticmethod
-    def _export(model: Model, export_related: bool = True) -> Iterator[tuple[str, str]]:
+    def _export(model: Model, export_related: bool = True) -> Iterator[Tuple[str, str]]:
         raise NotImplementedError("Subclasses MUST implement _export")
 
-    def run(self) -> Iterator[tuple[str, str]]:
+    def run(self) -> Iterator[Tuple[str, str]]:
         self.validate()
 
         metadata = {

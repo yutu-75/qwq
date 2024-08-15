@@ -15,45 +15,46 @@
 # specific language governing permissions and limitations
 # under the License.
 """a collection of Annotation-related models"""
-from typing import Any
+from typing import Any, Dict
 
 from flask_appbuilder import Model
 from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 from superset.models.helpers import AuditMixinNullable
-from superset.utils.core import MediumText
 
 
 class AnnotationLayer(Model, AuditMixinNullable):
+
     """A logical namespace for a set of annotations"""
 
     __tablename__ = "annotation_layer"
     id = Column(Integer, primary_key=True)
-    name = Column(String(250))
-    descr = Column(Text)
+    name = Column(String(250), comment='名称')
+    descr = Column(Text, comment='描述')
 
     def __repr__(self) -> str:
         return str(self.name)
 
 
 class Annotation(Model, AuditMixinNullable):
+
     """Time-related annotation"""
 
     __tablename__ = "annotation"
     id = Column(Integer, primary_key=True)
-    start_dttm = Column(DateTime)
-    end_dttm = Column(DateTime)
+    start_dttm = Column(DateTime, comment='开始时间')
+    end_dttm = Column(DateTime, comment='结束时间')
     layer_id = Column(Integer, ForeignKey("annotation_layer.id"), nullable=False)
-    short_descr = Column(String(500))
-    long_descr = Column(Text)
+    short_descr = Column(String(500), comment='短描述')
+    long_descr = Column(Text, comment='长描述')
     layer = relationship(AnnotationLayer, backref="annotation")
-    json_metadata = Column(MediumText())
+    json_metadata = Column(Text, comment='json 元数据')
 
     __table_args__ = (Index("ti_dag_state", layer_id, start_dttm, end_dttm),)
 
     @property
-    def data(self) -> dict[str, Any]:
+    def data(self) -> Dict[str, Any]:
         return {
             "layer_id": self.layer_id,
             "start_dttm": self.start_dttm,

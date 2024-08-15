@@ -14,7 +14,20 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
+# ------------------------------------------------------------------
+# File Name:        reports.py
+# Author:           王邦权
+# Version:          reports-001
+# Created:          2023/6/15
+# Rows:             89
+# Description:      ReportDataFormat
+#                   添加  PDF = "PDF"
+# ------------------------------------------------------------------
+
 """A collection of ORM sqlalchemy models for Superset"""
+import enum
+
 from cron_descriptor import get_description
 from flask_appbuilder import Model
 from flask_appbuilder.models.decorators import renders
@@ -24,7 +37,6 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
-    Index,
     Integer,
     String,
     Table,
@@ -40,30 +52,30 @@ from superset.models.dashboard import Dashboard
 from superset.models.helpers import AuditMixinNullable, ExtraJSONMixin
 from superset.models.slice import Slice
 from superset.reports.types import ReportScheduleExtra
-from superset.utils.backports import StrEnum
-from superset.utils.core import MediumText
 
 metadata = Model.metadata  # pylint: disable=no-member
 
 
-class ReportScheduleType(StrEnum):
+class ReportScheduleType(str, enum.Enum):
     ALERT = "Alert"
     REPORT = "Report"
 
 
-class ReportScheduleValidatorType(StrEnum):
+class ReportScheduleValidatorType(str, enum.Enum):
     """Validator types for alerts"""
 
     NOT_NULL = "not null"
     OPERATOR = "operator"
 
 
-class ReportRecipientType(StrEnum):
+class ReportRecipientType(str, enum.Enum):
     EMAIL = "Email"
     SLACK = "Slack"
+    ICHANGAN = "IChangAn"
+    WECOM = "Wecom"
 
 
-class ReportState(StrEnum):
+class ReportState(str, enum.Enum):
     SUCCESS = "Success"
     WORKING = "Working"
     ERROR = "Error"
@@ -71,19 +83,22 @@ class ReportState(StrEnum):
     GRACE = "On Grace"
 
 
-class ReportDataFormat(StrEnum):
+class ReportDataFormat(str, enum.Enum):
     VISUALIZATION = "PNG"
     DATA = "CSV"
     TEXT = "TEXT"
+    # --------  reports-001    start   --------
+    PDF = "PDF"
+    # --------  reports-001    end   --------
 
 
-class ReportCreationMethod(StrEnum):
+class ReportCreationMethod(str, enum.Enum):
     CHARTS = "charts"
     DASHBOARDS = "dashboards"
     ALERTS_REPORTS = "alerts_reports"
 
 
-class ReportSourceFormat(StrEnum):
+class ReportSourceFormat(str, enum.Enum):
     CHART = "chart"
     DASHBOARD = "dashboard"
 
@@ -92,23 +107,16 @@ report_schedule_user = Table(
     "report_schedule_user",
     metadata,
     Column("id", Integer, primary_key=True),
+    Column("user_id", Integer, ForeignKey("ab_user.id", ondelete="CASCADE"), nullable=False),
     Column(
-        "user_id",
-        Integer,
-        ForeignKey("ab_user.id", ondelete="CASCADE"),
-        nullable=False,
-    ),
-    Column(
-        "report_schedule_id",
-        Integer,
-        ForeignKey("report_schedule.id", ondelete="CASCADE"),
-        nullable=False,
+        "report_schedule_id", Integer, ForeignKey("report_schedule.id", ondelete="CASCADE"), nullable=False
     ),
     UniqueConstraint("user_id", "report_schedule_id"),
 )
 
 
-class ReportSchedule(AuditMixinNullable, ExtraJSONMixin, Model):
+class ReportSchedule(Model, AuditMixinNullable, ExtraJSONMixin):
+
     """
     Report Schedules, supports alerts and reports
     """
@@ -128,33 +136,29 @@ class ReportSchedule(AuditMixinNullable, ExtraJSONMixin, Model):
     )
     timezone = Column(String(100), default="UTC", nullable=False)
     report_format = Column(String(50), default=ReportDataFormat.VISUALIZATION)
-    sql = Column(MediumText())
+    sql = Column(Text())
     # (Alerts/Reports) M-O to chart
-    chart_id = Column(Integer, ForeignKey("slices.id"), nullable=True)
+    chart_id = Column(Integer, ForeignKey("slices.id", ondelete="CASCADE"), nullable=True)
     chart = relationship(Slice, backref="report_schedules", foreign_keys=[chart_id])
     # (Alerts/Reports) M-O to dashboard
-    dashboard_id = Column(Integer, ForeignKey("dashboards.id"), nullable=True)
+    dashboard_id = Column(Integer, ForeignKey("dashboards.id", ondelete="CASCADE"), nullable=True)
     dashboard = relationship(
         Dashboard, backref="report_schedules", foreign_keys=[dashboard_id]
     )
     # (Alerts) M-O to database
-    database_id = Column(Integer, ForeignKey("dbs.id"), nullable=True)
+    database_id = Column(Integer, ForeignKey("dbs.id", ondelete="CASCADE"), nullable=True)
     database = relationship(Database, foreign_keys=[database_id])
-    owners = relationship(
-        security_manager.user_model,
-        secondary=report_schedule_user,
-        passive_deletes=True,
-    )
+    owners = relationship(security_manager.user_model, secondary=report_schedule_user)
 
     # (Alerts) Stamped last observations
     last_eval_dttm = Column(DateTime)
     last_state = Column(String(50), default=ReportState.NOOP)
     last_value = Column(Float)
-    last_value_row_json = Column(MediumText())
+    last_value_row_json = Column(Text)
 
     # (Alerts) Observed value validation related columns
     validator_type = Column(String(100))
-    validator_config_json = Column(MediumText(), default="{}")
+    validator_config_json = Column(Text, default="{}")
 
     # Log retention
     log_retention = Column(Integer, default=90)
@@ -165,9 +169,6 @@ class ReportSchedule(AuditMixinNullable, ExtraJSONMixin, Model):
 
     # (Reports) When generating a screenshot, bypass the cache?
     force_screenshot = Column(Boolean, default=False)
-
-    custom_width = Column(Integer, nullable=True)
-    custom_height = Column(Integer, nullable=True)
 
     extra: ReportScheduleExtra  # type: ignore
 
@@ -187,9 +188,9 @@ class ReportRecipients(Model, AuditMixinNullable):
     __tablename__ = "report_recipient"
     id = Column(Integer, primary_key=True)
     type = Column(String(50), nullable=False)
-    recipient_config_json = Column(MediumText(), default="{}")
+    recipient_config_json = Column(Text, default="{}")
     report_schedule_id = Column(
-        Integer, ForeignKey("report_schedule.id"), nullable=False
+        Integer, ForeignKey("report_schedule.id", ondelete="CASCADE"), nullable=False
     )
     report_schedule = relationship(
         ReportSchedule,
@@ -197,12 +198,9 @@ class ReportRecipients(Model, AuditMixinNullable):
         foreign_keys=[report_schedule_id],
     )
 
-    __table_args__ = (
-        Index("ix_report_recipient_report_schedule_id", report_schedule_id),
-    )
-
 
 class ReportExecutionLog(Model):  # pylint: disable=too-few-public-methods
+
     """
     Report Execution Log, hold the result of the report execution with timestamps,
     last observation and possible error messages
@@ -210,30 +208,25 @@ class ReportExecutionLog(Model):  # pylint: disable=too-few-public-methods
 
     __tablename__ = "report_execution_log"
     id = Column(Integer, primary_key=True)
-    uuid = Column(UUIDType(binary=True))
+    uuid = Column(UUIDType(binary=True), comment='唯一标识')
 
     # Timestamps
-    scheduled_dttm = Column(DateTime, nullable=False)
-    start_dttm = Column(DateTime)
-    end_dttm = Column(DateTime)
+    scheduled_dttm = Column(DateTime, nullable=False, comment='定时任务时间')
+    start_dttm = Column(DateTime, comment='开始时间')
+    end_dttm = Column(DateTime, comment='结束时间')
 
     # (Alerts) Observed values
-    value = Column(Float)
-    value_row_json = Column(MediumText())
+    value = Column(Float, comment='值')
+    value_row_json = Column(Text)
 
-    state = Column(String(50), nullable=False)
-    error_message = Column(Text)
+    state = Column(String(50), nullable=False, comment='状态')
+    error_message = Column(Text, comment='错误信息')
 
     report_schedule_id = Column(
-        Integer, ForeignKey("report_schedule.id"), nullable=False
+        Integer, ForeignKey("report_schedule.id", ondelete="CASCADE"), nullable=False
     )
     report_schedule = relationship(
         ReportSchedule,
         backref=backref("logs", cascade="all,delete,delete-orphan"),
         foreign_keys=[report_schedule_id],
-    )
-
-    __table_args__ = (
-        Index("ix_report_execution_log_report_schedule_id", report_schedule_id),
-        Index("ix_report_execution_log_start_dttm", start_dttm),
     )

@@ -18,33 +18,27 @@
 from typing import Any, Optional
 from uuid import uuid3
 
-from superset.key_value.types import JsonKeyValueCodec, KeyValueResource, SharedKey
+from superset.key_value.types import KeyValueResource, SharedKey
 from superset.key_value.utils import get_uuid_namespace, random_key
 
 RESOURCE = KeyValueResource.APP
 NAMESPACE = get_uuid_namespace("")
-CODEC = JsonKeyValueCodec()
 
 
 def get_shared_value(key: SharedKey) -> Optional[Any]:
     # pylint: disable=import-outside-toplevel
-    from superset.commands.key_value.get import GetKeyValueCommand
+    from superset.key_value.commands.get import GetKeyValueCommand
 
     uuid_key = uuid3(NAMESPACE, key)
-    return GetKeyValueCommand(RESOURCE, key=uuid_key, codec=CODEC).run()
+    return GetKeyValueCommand(RESOURCE, key=uuid_key).run()
 
 
 def set_shared_value(key: SharedKey, value: Any) -> None:
     # pylint: disable=import-outside-toplevel
-    from superset.commands.key_value.create import CreateKeyValueCommand
+    from superset.key_value.commands.create import CreateKeyValueCommand
 
     uuid_key = uuid3(NAMESPACE, key)
-    CreateKeyValueCommand(
-        resource=RESOURCE,
-        value=value,
-        key=uuid_key,
-        codec=CODEC,
-    ).run()
+    CreateKeyValueCommand(resource=RESOURCE, value=value, key=uuid_key).run()
 
 
 def get_permalink_salt(key: SharedKey) -> str:

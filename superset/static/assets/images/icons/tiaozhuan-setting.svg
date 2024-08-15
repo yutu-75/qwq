@@ -1,0 +1,11 @@
+<!--
+ * @Description: File Content
+ * @Date: 2023-07-28 17:04:44
+ * @Author: tanfengqiao
+ * @LastEditTime: 2023-07-28 17:05:42
+ * @LastEditors: tanfengqiao
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+  <path fill="none" d="M0,0H20V20H0Z" />
+  <path fill="currentColor" d="M5,14V5H7v7h7.586V6.586L21,13l-6.414,6.414V14Z" transform="translate(-3 -2.2)" />
+</svg>

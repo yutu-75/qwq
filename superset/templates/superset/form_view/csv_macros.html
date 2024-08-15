@@ -48,11 +48,14 @@ under the License.
 {% macro render_collapsable_form_group(id, section_title='') %}
   <div class="form-group" id="{{id}}">
     <div class="col-xs-12" style="padding: 0;">
-      <table class="table table-bordered">
+      <table class="table table-bordered" summary="nothing">
+        <thead class="test-1" style="display: none">
+          <th id="test-1"></th>
+        </thead>
         <tbody>
           <tr data-toggle="collapse" data-target="#collapsable-content-{{id}}" class="accordion-toggle">
             <td class="col-xs-12" role="button" style="border: none;">
-              <i class="fa fa-chevron-down" style="color: #666666; margin-right: 8px; margin-left: 12px;"></i>
+              <em class="fa fa-chevron-down" style="color: #666666; margin-right: 8px; margin-left: 12px;"></em>
               {{section_title}}
             </td>
           </tr>
@@ -60,7 +63,10 @@ under the License.
           <tr class="collapse" id="collapsable-content-{{id}}">
             <td colspan="12" style="padding: 0;">
               <div>
-                <table class="table table-bordered" style="margin-bottom: 0; background-color: transparent; border: none;">
+                <table class="table table-bordered" style="margin-bottom: 0; background-color: transparent; border: none;" summary="nothing">
+                  <thead class="test-1" style="display: none">
+                    <th id="test-2"></th>
+                  </thead>
                   <tbody>
                     {{ caller() }}
                   </tbody>

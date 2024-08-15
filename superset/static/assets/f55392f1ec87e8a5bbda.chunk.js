@@ -1,0 +1,10 @@
+"use strict";(globalThis.webpackChunksuperset=globalThis.webpackChunksuperset||[]).push([[8464],{708464:(e,t,l)=>{l.r(t),l.d(t,{default:()=>d});var a=l(205872),n=l.n(a),s=l(355786),u=l(310581),o=l(455867),i=l(667294),r=l(49937),h=l(174448),c=l(211965);function d(e){var t;const{data:l,formData:a,height:d,width:v,setDataMask:g,setHoveredFilter:m,unsetHoveredFilter:p,setFocusedFilter:f,unsetFocusedFilter:b,setFilterActive:w,filterState:F,inputRef:S}=e,{defaultValue:Z,multiSelect:k}=a,[C,M]=(0,i.useState)(null!=Z?Z:[]),x=e=>{const t=(0,s.Z)(e);M(t);const l={};t.length&&(l.interactive_groupby=t),g({filterState:{value:t.length?t:null},extraFormData:l})};(0,i.useEffect)((()=>{x(F.value)}),[JSON.stringify(F.value),k]),(0,i.useEffect)((()=>{x(null!=Z?Z:null)}),[JSON.stringify(Z),k]);const y=(0,s.Z)(a.groupby).map(u.Z),D=null!=(t=y[0])&&t.length?y[0]:null,_=D?l.filter((e=>D.includes(e.column_name))):l,A=l?_:[],E=0===A.length?(0,o.t)("No columns"):(0,o.tn)("%s option","%s options",A.length,A.length),K={};F.validateMessage&&(K.extra=(0,c.tZ)(h.Am,{status:F.validateStatus},F.validateMessage));const N=A.map((e=>{const{column_name:t,verbose_name:l}=e;return{label:null!=l?l:t,value:t}}));return(0,c.tZ)(h.un,{height:d,width:v},(0,c.tZ)(h.jp,n()({validateStatus:F.validateStatus},K),(0,c.tZ)(r.Ph,{allowClear:!0,value:C,placeholder:E,mode:k?"multiple":void 0,onChange:x,onBlur:b,onFocus:f,onMouseEnter:m,onMouseLeave:p,ref:S,options:N,onDropdownVisibleChange:w})))}},174448:(e,t,l)=>{l.d(t,{Am:()=>o,jp:()=>u,un:()=>s});var a=l(751995),n=l(804591);const s=a.iK.div`
+  min-height: ${({height:e})=>e}px;
+  width: ${({width:e})=>e}px;
+`,u=(0,a.iK)(n.Z)`
+  &.ant-row.ant-form-item {
+    margin: 0;
+  }
+`,o=a.iK.div`
+  color: ${({theme:e,status:t="error"})=>{var l;return null==(l=e.colors[t])?void 0:l.base}};
+`}}]);

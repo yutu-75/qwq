@@ -1,0 +1,17 @@
+<!--
+ * @Description: File Content
+ * @Date: 2023-07-20 19:56:27
+ * @Author: tanfengqiao
+ * @LastEditTime: 2023-07-20 19:57:27
+ * @LastEditors: tanfengqiao
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+  <g transform="translate(-2 -391.5)">
+    <path fill="currentColor" d="M3,4H19V5.778H3ZM3,17.333H8.444v1.778H3Zm0-4.444H6v1.778H3ZM3,8.444H7.444v1.778H3Z"
+      transform="translate(3 393)" />
+    <path fill="currentColor"
+      d="M3.448,9.517,5.489,7.476l1.7,1.7L9.081,7.279,8,6.2h3v3L9.929,8.127,7.186,10.87l-1.7-1.7L4,10.657a4.777,4.777,0,1,0-.556-1.141Zm-.923.935-.006-.006,0,0a6.008,6.008,0,1,1,0,.008Z"
+      transform="translate(7.995 397.997)" />
+    <rect fill="none" width="20" height="20" transform="translate(4 394.5)" />
+  </g>
+</svg>

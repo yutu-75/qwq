@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+    <defs>
+        <style>
+            .a,
+            .b,
+            .c {
+                fill: none;
+            }
+
+            .b,
+            .c {
+                stroke: #999;
+                stroke-linejoin: round;
+                stroke-width: 1.5px;
+            }
+
+            .c {
+                stroke-linecap: round;
+            }
+        </style>
+    </defs>
+    <g transform="translate(-977 -494)">
+        <rect class="a" width="20" height="20" transform="translate(977 494)" />
+        <g transform="translate(976.986 493.986)">
+            <path class="b" d="M9.423,14.846A5.423,5.423,0,1,0,4,9.423,5.423,5.423,0,0,0,9.423,14.846Z" />
+            <path class="c" d="M33.222,33.222l2.707,2.707" transform="translate(-19.9 -19.9)" />
+        </g>
+    </g>
+</svg>

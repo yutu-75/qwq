@@ -15,14 +15,14 @@
 # specific language governing permissions and limitations
 # under the License.
 import io
-import json
 import os
+import re
 import tempfile
 import zipfile
 from typing import Any, TYPE_CHECKING
-
+from datetime import datetime, timedelta
 import pandas as pd
-from flask import flash, g, redirect
+from flask import flash, g, redirect, request
 from flask_appbuilder import expose, SimpleFormView
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from flask_appbuilder.security.decorators import has_access
@@ -32,9 +32,11 @@ from wtforms.fields import StringField
 from wtforms.validators import ValidationError
 
 import superset.models.core as models
-from superset import app, db
+
+from superset import app, db, conf
 from superset.connectors.sqla.models import SqlaTable
-from superset.constants import MODEL_VIEW_RW_METHOD_PERMISSION_MAP, RouteMethod
+from superset.constants import MODEL_VIEW_RW_METHOD_PERMISSION_MAP, RouteMethod, \
+    MenuName
 from superset.exceptions import CertificateException
 from superset.extensions import event_logger
 from superset.sql_parse import Table
@@ -45,6 +47,9 @@ from superset.views.base import DeleteMixin, SupersetModelView, YamlExportMixin
 from .forms import ColumnarToDatabaseForm, CsvToDatabaseForm, ExcelToDatabaseForm
 from .mixins import DatabaseMixin
 from .validators import schema_allows_file_upload, sqlalchemy_uri_validator
+
+from superset import const
+from ...sys_manager.menus.dao import SysMenuDAO
 
 if TYPE_CHECKING:
     from werkzeug.datastructures import FileStorage
@@ -107,6 +112,8 @@ class DatabaseView(
     @expose("/list/")
     @has_access
     def list(self) -> FlaskResponse:
+        menu = SysMenuDAO.find_by_name(MenuName.DATASOURCE)
+        menu.can_access()
         return super().render_app_template()
 
 
@@ -123,7 +130,7 @@ class CustomFormView(SimpleFormView):
     your form pre-processing and post-processing
     """
 
-    @expose("/form", methods=("GET",))
+    @expose("/form", methods=["GET"])
     @has_access
     def this_form_get(self) -> Any:
         self._init_vars()
@@ -137,13 +144,14 @@ class CustomFormView(SimpleFormView):
             appbuilder=self.appbuilder,
         )
 
-    @expose("/form", methods=("POST",))
+    @expose("/form", methods=["POST"])
     @has_access
     def this_form_post(self) -> Any:
         self._init_vars()
         form = self.form.refresh()
         if form.validate_on_submit():
             response = self.form_post(form)  # pylint: disable=assignment-from-no-return
+
             if not response:
                 return redirect(self.get_redirect())
             return response
@@ -159,7 +167,7 @@ class CsvToDatabaseView(CustomFormView):
     form = CsvToDatabaseForm
     form_template = "superset/form_view/csv_to_database_view/edit.html"
     form_title = _("CSV to Database configuration")
-    add_columns = ["database", "schema", "table_name"]
+    add_columns = ["database", "schema", "table_name", "table_entry", "table_source"]
 
     def form_get(self, form: CsvToDatabaseForm) -> None:
         form.delimiter.data = ","
@@ -167,7 +175,7 @@ class CsvToDatabaseView(CustomFormView):
         form.overwrite_duplicate.data = True
         form.skip_initial_space.data = False
         form.skip_blank_lines.data = True
-        form.day_first.data = False
+        form.infer_datetime_format.data = True
         form.decimal.data = "."
         form.if_exists.data = "fail"
 
@@ -175,7 +183,7 @@ class CsvToDatabaseView(CustomFormView):
         database = form.database.data
         csv_table = Table(table=form.table_name.data, schema=form.schema.data)
         delimiter_input = form.delimiter.data
-
+        table_source = "csv"
         if not schema_allows_file_upload(database, csv_table.schema):
             message = _(
                 'Database "%(database_name)s" schema "%(schema_name)s" '
@@ -184,13 +192,18 @@ class CsvToDatabaseView(CustomFormView):
                 schema_name=csv_table.schema,
             )
             flash(message, "danger")
-            return redirect("/csvtodatabaseview/form")
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/csvtodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
         if form.delimiter.data == "other":
             delimiter_input = form.otherInput.data
-
         try:
-            kwargs = {"dtype": json.loads(form.dtype.data)} if form.dtype.data else {}
             df = pd.concat(
                 pd.read_csv(
                     chunksize=1000,
@@ -198,9 +211,10 @@ class CsvToDatabaseView(CustomFormView):
                     filepath_or_buffer=form.csv_file.data,
                     header=form.header.data if form.header.data else 0,
                     index_col=form.index_col.data,
-                    dayfirst=form.day_first.data,
+                    infer_datetime_format=form.infer_datetime_format.data,
                     iterator=True,
                     keep_default_na=not form.null_values.data,
+                    mangle_dupe_cols=form.overwrite_duplicate.data,
                     usecols=form.use_cols.data if form.use_cols.data else None,
                     na_values=form.null_values.data if form.null_values.data else None,
                     nrows=form.nrows.data,
@@ -209,16 +223,31 @@ class CsvToDatabaseView(CustomFormView):
                     skip_blank_lines=form.skip_blank_lines.data,
                     skipinitialspace=form.skip_initial_space.data,
                     skiprows=form.skiprows.data,
-                    **kwargs,
                 )
             )
+            # 定义表头格式的正则表达式
+            header_regex = r'^[\u4e00-\u9fa5]+$|^[\u4e00-\u9fa5]+\d+$|^[\u4e00-\u9fa5]+\w+$'
 
+            for column in df.columns:
+                if not re.match(header_regex, column):
+                    message = _(
+                        'The upload failed, please check the header; the header only supports the format of "Chinese characters, Chinese characters + numbers, Chinese characters + letters".'
+                    )
+                    flash(message, "danger")
+                    table_entry = None
+
+                    if "table_entry" in request.args:
+                        if request.args["table_entry"] == "data":
+                            table_entry = "data"
+                        elif request.args["table_entry"] == "chart":
+                            table_entry = "chart"
+                    redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/csvtodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+                    return redirect(redirect_url)
             database = (
                 db.session.query(models.Database)
                 .filter_by(id=form.data.get("database").data.get("id"))
                 .one()
             )
-
             database.db_engine_spec.df_to_sql(
                 database,
                 csv_table,
@@ -230,38 +259,45 @@ class CsvToDatabaseView(CustomFormView):
                     "index_label": form.index_label.data,
                 },
             )
-
-            # Connect table to the database that should be used for exploration.
-            # E.g. if hive was used to upload a csv, presto will be a better option
-            # to explore the table.
-            explore_database = database
+            expore_database = database
             explore_database_id = database.explore_database_id
             if explore_database_id:
-                explore_database = (
+                expore_database = (
                     db.session.query(models.Database)
                     .filter_by(id=explore_database_id)
                     .one_or_none()
                     or database
                 )
+            table_entry = None
+
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
 
             sqla_table = (
                 db.session.query(SqlaTable)
                 .filter_by(
                     table_name=csv_table.table,
                     schema=csv_table.schema,
-                    database_id=explore_database.id,
+                    database_id=expore_database.id,
+                    table_entry=table_entry,
+                    table_source=table_source,
                 )
                 .one_or_none()
             )
-
             if sqla_table:
                 sqla_table.fetch_metadata()
             if not sqla_table:
                 sqla_table = SqlaTable(table_name=csv_table.table)
-                sqla_table.database = explore_database
+                sqla_table.database = expore_database
                 sqla_table.database_id = database.id
                 sqla_table.owners = [g.user]
                 sqla_table.schema = csv_table.schema
+                sqla_table.table_entry = table_entry
+                sqla_table.table_source = table_source
+                sqla_table.custom_name = csv_table.table
                 sqla_table.fetch_metadata()
                 db.session.add(sqla_table)
             db.session.commit()
@@ -276,11 +312,18 @@ class CsvToDatabaseView(CustomFormView):
                 db_name=database.database_name,
                 error_msg=str(ex),
             )
-
             flash(message, "danger")
             stats_logger.incr("failed_csv_upload")
-            return redirect("/csvtodatabaseview/form")
+            # return redirect("/csvtodatabaseview/form")
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/csvtodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
         # Go back to welcome page / splash screen
         message = _(
             'CSV file "%(csv_filename)s" uploaded to table "%(table_name)s" in '
@@ -289,32 +332,56 @@ class CsvToDatabaseView(CustomFormView):
             table_name=str(csv_table),
             db_name=sqla_table.database.database_name,
         )
-        flash(message, "info")
+        # flash(message, "info")
         event_logger.log_with_context(
             action="successful_csv_upload",
             database=form.database.data.name,
             schema=form.schema.data,
             table=form.table_name.data,
         )
-        return redirect("/tablemodelview/list/")
+        # return redirect("/tablemodelview/list/")
+        if "redict_url" in request.args:
+            redirect_url = request.args.get("redict_url")
+            if '?' in redirect_url:
+                redirect_url += f"&table_name={form.table_name.data}"
+            else:
+                message = _(
+                    'CSV file uploaded successfully',
+                )
+                flash(message, "info")
+                if "table_entry" in request.args:
+                    if request.args["table_entry"] == "data":
+                        table_entry = "data"
+                    elif request.args["table_entry"] == "chart":
+                        table_entry = "chart"
+                redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/csvtodatabaseview/form?table_entry={table_entry}&table_source={table_source}&standalone=true"
+                return redirect(redirect_url)
+
+        else:
+            # message = _(
+            #     'CSV 文件上传成功',
+            # )
+            flash(message, "info")
+            return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/tablemodelview/list/")
 
 
 class ExcelToDatabaseView(SimpleFormView):
     form = ExcelToDatabaseForm
     form_template = "superset/form_view/excel_to_database_view/edit.html"
     form_title = _("Excel to Database configuration")
-    add_columns = ["database", "schema", "table_name"]
+    add_columns = ["database", "schema", "table_name", "table_entry", "table_source"]
 
     def form_get(self, form: ExcelToDatabaseForm) -> None:
         form.header.data = 0
+        form.mangle_dupe_cols.data = True
         form.decimal.data = "."
         form.if_exists.data = "fail"
         form.sheet_name.data = ""
 
     def form_post(self, form: ExcelToDatabaseForm) -> Response:
         database = form.database.data
-        excel_table = Table(table=form.name.data, schema=form.schema.data)
-
+        excel_table = Table(table=form.table_name.data, schema=form.schema.data)
+        table_source = "excel"
         if not schema_allows_file_upload(database, excel_table.schema):
             message = _(
                 'Database "%(database_name)s" schema "%(schema_name)s" '
@@ -323,8 +390,17 @@ class ExcelToDatabaseView(SimpleFormView):
                 schema_name=excel_table.schema,
             )
             flash(message, "danger")
-            return redirect("/exceltodatabaseview/form")
+            # return redirect("/exceltodatabaseview/form")
+            # return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/exceltodatabaseview/form")
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/exceltodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
         uploaded_tmp_file_path = (
             tempfile.NamedTemporaryFile(  # pylint: disable=consider-using-with
                 dir=app.config["UPLOAD_FOLDER"],
@@ -336,18 +412,35 @@ class ExcelToDatabaseView(SimpleFormView):
         try:
             utils.ensure_path_exists(config["UPLOAD_FOLDER"])
             upload_stream_write(form.excel_file.data, uploaded_tmp_file_path)
-
             df = pd.read_excel(
                 header=form.header.data if form.header.data else 0,
                 index_col=form.index_col.data,
                 io=form.excel_file.data,
                 keep_default_na=not form.null_values.data,
-                na_values=form.null_values.data if form.null_values.data else [],
+                na_values=form.null_values.data if form.null_values.data else None,
                 parse_dates=form.parse_dates.data,
                 skiprows=form.skiprows.data,
                 sheet_name=form.sheet_name.data if form.sheet_name.data else 0,
             )
 
+            # 定义表头格式的正则表达式
+            header_regex = r'^[\u4e00-\u9fa5]+$|^[\u4e00-\u9fa5]+\d+$|^[\u4e00-\u9fa5]+\w+$'
+
+            for column in df.columns:
+                if not re.match(header_regex, column):
+                    message = _(
+                        'The upload failed, please check the header; the header only supports the format of "Chinese characters, Chinese characters + numbers, Chinese characters + letters".'
+                    )
+                    flash(message, "danger")
+                    table_entry = None
+
+                    if "table_entry" in request.args:
+                        if request.args["table_entry"] == "data":
+                            table_entry = "data"
+                        elif request.args["table_entry"] == "chart":
+                            table_entry = "chart"
+                    redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/exceltodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+                    return redirect(redirect_url)
             database = (
                 db.session.query(models.Database)
                 .filter_by(id=form.data.get("database").data.get("id"))
@@ -369,22 +462,30 @@ class ExcelToDatabaseView(SimpleFormView):
             # Connect table to the database that should be used for exploration.
             # E.g. if hive was used to upload a excel, presto will be a better option
             # to explore the table.
-            explore_database = database
+            expore_database = database
             explore_database_id = database.explore_database_id
             if explore_database_id:
-                explore_database = (
+                expore_database = (
                     db.session.query(models.Database)
                     .filter_by(id=explore_database_id)
                     .one_or_none()
                     or database
                 )
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
             sqla_table = (
                 db.session.query(SqlaTable)
                 .filter_by(
                     table_name=excel_table.table,
                     schema=excel_table.schema,
-                    database_id=explore_database.id,
+                    database_id=expore_database.id,
+                    table_entry=table_entry,
+                    table_source=table_source,
                 )
                 .one_or_none()
             )
@@ -393,52 +494,84 @@ class ExcelToDatabaseView(SimpleFormView):
                 sqla_table.fetch_metadata()
             if not sqla_table:
                 sqla_table = SqlaTable(table_name=excel_table.table)
-                sqla_table.database = explore_database
+                sqla_table.database = expore_database
                 sqla_table.database_id = database.id
                 sqla_table.owners = [g.user]
                 sqla_table.schema = excel_table.schema
+                sqla_table.table_entry = table_entry
+                sqla_table.table_source = table_source
+                sqla_table.custom_name = excel_table.table
                 sqla_table.fetch_metadata()
                 db.session.add(sqla_table)
             db.session.commit()
         except Exception as ex:  # pylint: disable=broad-except
             db.session.rollback()
             message = _(
-                'Unable to upload Excel file "%(filename)s" to table '
+                'Unable to upload EXCEL file "%(filename)s" to table '
                 '"%(table_name)s" in database "%(db_name)s". '
                 "Error message: %(error_msg)s",
                 filename=form.excel_file.data.filename,
-                table_name=form.name.data,
+                table_name=form.table_name.data,
                 db_name=database.database_name,
                 error_msg=str(ex),
             )
-
             flash(message, "danger")
             stats_logger.incr("failed_excel_upload")
-            return redirect("/exceltodatabaseview/form")
+            # return redirect("/csvtodatabaseview/form")
+            table_entry = None
 
-        # Go back to welcome page / splash screen
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/exceltodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
+            # Go back to welcome page / splash screen
         message = _(
-            'Excel file "%(excel_filename)s" uploaded to table "%(table_name)s" in '
+            'EXCEL file "%(excel_filename)s" uploaded to table "%(table_name)s" in '
             'database "%(db_name)s"',
             excel_filename=form.excel_file.data.filename,
             table_name=str(excel_table),
             db_name=sqla_table.database.database_name,
         )
-        flash(message, "info")
+        # flash(message, "info")
         event_logger.log_with_context(
             action="successful_excel_upload",
             database=form.database.data.name,
             schema=form.schema.data,
-            table=form.name.data,
+            table=form.table_name.data,
         )
-        return redirect("/tablemodelview/list/")
+        # return redirect("/tablemodelview/list/")
+        if "redict_url" in request.args:
+            redirect_url = request.args.get("redict_url")
+            if '?' in redirect_url:
+                redirect_url += f"&table_name={form.table_name.data}"
+            else:
+                message = _(
+                    'Excel file uploaded successfully',
+                )
+                flash(message, "info")
+                if "table_entry" in request.args:
+                    if request.args["table_entry"] == "data":
+                        table_entry = "data"
+                    elif request.args["table_entry"] == "chart":
+                        table_entry = "chart"
+                redirect_url = f"{conf['STATIC_ASSETS_PREFIX']}/exceltodatabaseview/form?table_entry={table_entry}&table_source={table_source}&standalone=true"
+                return redirect(redirect_url)
+        else:
+            # message = _(
+            #     'Excel 文件上传成功',
+            # )
+            flash(message, "info")
+            return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/tablemodelview/list/")
 
 
 class ColumnarToDatabaseView(SimpleFormView):
     form = ColumnarToDatabaseForm
     form_template = "superset/form_view/columnar_to_database_view/edit.html"
     form_title = _("Columnar to Database configuration")
-    add_columns = ["database", "schema", "table_name"]
+    add_columns = ["database", "schema", "table_name", "table_entry", "table_source"]
 
     def form_get(self, form: ColumnarToDatabaseForm) -> None:
         form.if_exists.data = "fail"
@@ -450,14 +583,13 @@ class ColumnarToDatabaseView(SimpleFormView):
         columnar_table = Table(table=form.name.data, schema=form.schema.data)
         files = form.columnar_file.data
         file_type = {file.filename.split(".")[-1] for file in files}
-
+        table_source = "columnar"
         if file_type == {"zip"}:
             zipfile_ob = zipfile.ZipFile(  # pylint: disable=consider-using-with
                 form.columnar_file.data[0]
-            )
+            )  # pylint: disable=consider-using-with
             file_type = {filename.split(".")[-1] for filename in zipfile_ob.namelist()}
             files = [
-                # pylint: disable=consider-using-with
                 io.BytesIO((zipfile_ob.open(filename).read(), filename)[0])
                 for filename in zipfile_ob.namelist()
             ]
@@ -468,8 +600,17 @@ class ColumnarToDatabaseView(SimpleFormView):
                 " Please make sure all files are of the same extension.",
             )
             flash(message, "danger")
-            return redirect("/columnartodatabaseview/form")
+            # return redirect("/columnartodatabaseview/form")
+            # return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/columnartodatabaseview/form")
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"/columnartodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
         read = pd.read_parquet
         kwargs = {
             "columns": form.usecols.data if form.usecols.data else None,
@@ -484,12 +625,38 @@ class ColumnarToDatabaseView(SimpleFormView):
                 schema_name=columnar_table.schema,
             )
             flash(message, "danger")
-            return redirect("/columnartodatabaseview/form")
+            # return redirect("/columnartodatabaseview/form")
+            # return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/columnartodatabaseview/form")
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"/columnartodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
         try:
             chunks = [read(file, **kwargs) for file in files]
             df = pd.concat(chunks)
+            # 定义表头格式的正则表达式
+            header_regex = r'^[\u4e00-\u9fa5]+$|^[\u4e00-\u9fa5]+\d+$|^[\u4e00-\u9fa5]+\w+$'
 
+            for column in df.columns:
+                if not re.match(header_regex, column):
+                    message = _(
+                        'Header verification failed: column name does not meet the requirements. Upload failed, please check the header; The header only supports "Chinese characters, Chinese characters+numbers, Chinese characters+letters" format.'
+                    )
+                    flash(message, "danger")
+                    table_entry = None
+
+                    if "table_entry" in request.args:
+                        if request.args["table_entry"] == "data":
+                            table_entry = "data"
+                        elif request.args["table_entry"] == "chart":
+                            table_entry = "chart"
+                    redirect_url = f"/columnartodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+                    return redirect(redirect_url)
             database = (
                 db.session.query(models.Database)
                 .filter_by(id=form.data.get("database").data.get("id"))
@@ -511,22 +678,30 @@ class ColumnarToDatabaseView(SimpleFormView):
             # Connect table to the database that should be used for exploration.
             # E.g. if hive was used to upload a csv, presto will be a better option
             # to explore the table.
-            explore_database = database
+            expore_database = database
             explore_database_id = database.explore_database_id
             if explore_database_id:
-                explore_database = (
+                expore_database = (
                     db.session.query(models.Database)
                     .filter_by(id=explore_database_id)
                     .one_or_none()
                     or database
                 )
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
             sqla_table = (
                 db.session.query(SqlaTable)
                 .filter_by(
                     table_name=columnar_table.table,
                     schema=columnar_table.schema,
-                    database_id=explore_database.id,
+                    database_id=expore_database.id,
+                    table_entry=table_entry,
+                    table_source=table_source,
                 )
                 .one_or_none()
             )
@@ -535,10 +710,13 @@ class ColumnarToDatabaseView(SimpleFormView):
                 sqla_table.fetch_metadata()
             if not sqla_table:
                 sqla_table = SqlaTable(table_name=columnar_table.table)
-                sqla_table.database = explore_database
+                sqla_table.database = expore_database
                 sqla_table.database_id = database.id
                 sqla_table.owners = [g.user]
                 sqla_table.schema = columnar_table.schema
+                sqla_table.table_entry = table_entry
+                sqla_table.table_source = table_source
+                sqla_table.custom_name = columnar_table.table
                 sqla_table.fetch_metadata()
                 db.session.add(sqla_table)
             db.session.commit()
@@ -556,8 +734,17 @@ class ColumnarToDatabaseView(SimpleFormView):
 
             flash(message, "danger")
             stats_logger.incr("failed_columnar_upload")
-            return redirect("/columnartodatabaseview/form")
+            # return redirect("/columnartodatabaseview/form")
+            # return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/columnartodatabaseview/form")
+            table_entry = None
 
+            if "table_entry" in request.args:
+                if request.args["table_entry"] == "data":
+                    table_entry = "data"
+                elif request.args["table_entry"] == "chart":
+                    table_entry = "chart"
+            redirect_url = f"/columnartodatabaseview/form?table_entry={table_entry}&table_source={table_source}"
+            return redirect(redirect_url)
         # Go back to welcome page / splash screen
         message = _(
             'Columnar file "%(columnar_filename)s" uploaded to table "%(table_name)s" '
@@ -573,4 +760,5 @@ class ColumnarToDatabaseView(SimpleFormView):
             schema=form.schema.data,
             table=form.name.data,
         )
-        return redirect("/tablemodelview/list/")
+        # return redirect("/tablemodelview/list/")
+        return redirect(f"{conf['STATIC_ASSETS_PREFIX']}/tablemodelview/list/")

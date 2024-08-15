@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -14,8 +15,19 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
+# ------------------------------------------------------------------
+# File Name:        base.py
+# Author:           王邦权
+# Version:          base-001
+# Created:          2023/6/15
+# Rows:             46
+# Description:      NotificationContent
+#                   添加  pdf: Optional[bytes] = None
+# ------------------------------------------------------------------
+
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, List, Optional, Type
 
 import pandas as pd
 
@@ -28,11 +40,14 @@ class NotificationContent:
     name: str
     header_data: HeaderDataType  # this is optional to account for error states
     csv: Optional[bytes] = None  # bytes for csv file
-    screenshots: Optional[list[bytes]] = None  # bytes for a list of screenshots
+    screenshots: Optional[List[bytes]] = None  # bytes for a list of screenshots
     text: Optional[str] = None
     description: Optional[str] = ""
     url: Optional[str] = None  # url to chart/dashboard for this screenshot
     embedded_data: Optional[pd.DataFrame] = None
+    # --------  base-001    start   --------
+    pdf: Optional[bytes] = None  # bytes for pdf file
+    # --------  base-001    end   --------
 
 
 class BaseNotification:  # pylint: disable=too-few-public-methods
@@ -43,7 +58,7 @@ class BaseNotification:  # pylint: disable=too-few-public-methods
     notification type
     """
 
-    plugins: list[type["BaseNotification"]] = []
+    plugins: List[Type["BaseNotification"]] = []
     type: Optional[ReportRecipientType] = None
     """
     Child classes set their notification type ex: `type = "email"` this string will be

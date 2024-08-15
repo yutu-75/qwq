@@ -15,14 +15,16 @@
 # specific language governing permissions and limitations
 # under the License.
 import logging
+import hashlib
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from flask import Flask
 from flask_babel import lazy_gettext as _
 from sqlalchemy import text, TypeDecorator
 from sqlalchemy.engine import Connection, Dialect, Row
 from sqlalchemy_utils import EncryptedType
+from werkzeug.security import generate_password_hash
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,9 @@ class AbstractEncryptedFieldAdapter(ABC):  # pylint: disable=too-few-public-meth
     @abstractmethod
     def create(
         self,
-        app_config: Optional[dict[str, Any]],
-        *args: list[Any],
-        **kwargs: Optional[dict[str, Any]],
+        app_config: Optional[Dict[str, Any]],
+        *args: List[Any],
+        **kwargs: Optional[Dict[str, Any]],
     ) -> TypeDecorator:
         pass
 
@@ -43,38 +45,34 @@ class SQLAlchemyUtilsAdapter(  # pylint: disable=too-few-public-methods
 ):
     def create(
         self,
-        app_config: Optional[dict[str, Any]],
-        *args: list[Any],
-        **kwargs: Optional[dict[str, Any]],
+        app_config: Optional[Dict[str, Any]],
+        *args: List[Any],
+        **kwargs: Optional[Dict[str, Any]],
     ) -> TypeDecorator:
         if app_config:
             return EncryptedType(*args, app_config["SECRET_KEY"], **kwargs)
 
-        raise Exception(  # pylint: disable=broad-exception-raised
-            "Missing app_config kwarg"
-        )
+        raise Exception("Missing app_config kwarg")
 
 
 class EncryptedFieldFactory:
     def __init__(self) -> None:
         self._concrete_type_adapter: Optional[AbstractEncryptedFieldAdapter] = None
-        self._config: Optional[dict[str, Any]] = None
+        self._config: Optional[Dict[str, Any]] = None
 
     def init_app(self, app: Flask) -> None:
         self._config = app.config
-        self._concrete_type_adapter = self._config[  # type: ignore
+        self._concrete_type_adapter = self._config[
             "SQLALCHEMY_ENCRYPTED_FIELD_TYPE_ADAPTER"
         ]()
 
     def create(
-        self, *args: list[Any], **kwargs: Optional[dict[str, Any]]
+        self, *args: List[Any], **kwargs: Optional[Dict[str, Any]]
     ) -> TypeDecorator:
         if self._concrete_type_adapter:
             return self._concrete_type_adapter.create(self._config, *args, **kwargs)
 
-        raise Exception(  # pylint: disable=broad-exception-raised
-            "App not initialized yet. Please call init_app first"
-        )
+        raise Exception("App not initialized yet. Please call init_app first")
 
 
 class SecretsMigrator:
@@ -85,14 +83,14 @@ class SecretsMigrator:
         self._previous_secret_key = previous_secret_key
         self._dialect: Dialect = db.engine.url.get_dialect()
 
-    def discover_encrypted_fields(self) -> dict[str, dict[str, EncryptedType]]:
+    def discover_encrypted_fields(self) -> Dict[str, Dict[str, EncryptedType]]:
         """
         Iterates over SqlAlchemy's metadata, looking for EncryptedType
         columns along the way. Builds up a dict of
         table_name -> dict of col_name: enc type instance
         :return:
         """
-        meta_info: dict[str, Any] = {}
+        meta_info: Dict[str, Any] = {}
 
         for table_name, table in self._db.metadata.tables.items():
             for col_name, col in table.columns.items():
@@ -124,7 +122,7 @@ class SecretsMigrator:
 
     @staticmethod
     def _select_columns_from_table(
-        conn: Connection, column_names: list[str], table_name: str
+        conn: Connection, column_names: List[str], table_name: str
     ) -> Row:
         return conn.execute(f"SELECT id, {','.join(column_names)} FROM {table_name}")
 
@@ -133,7 +131,7 @@ class SecretsMigrator:
         conn: Connection,
         row: Row,
         table_name: str,
-        columns: dict[str, EncryptedType],
+        columns: Dict[str, EncryptedType],
     ) -> None:
         """
         Re encrypts all columns in a Row
@@ -150,7 +148,7 @@ class SecretsMigrator:
                 unencrypted_value = previous_encrypted_type.process_result_value(
                     self._read_bytes(column_name, row[column_name]), self._dialect
                 )
-            except ValueError as ex:
+            except ValueError as exc:
                 # Failed to unencrypt
                 try:
                     encrypted_type.process_result_value(
@@ -164,7 +162,7 @@ class SecretsMigrator:
                     )
                     return
                 except Exception:
-                    raise Exception from ex  # pylint: disable=broad-exception-raised
+                    raise Exception from exc
 
             re_encrypted_columns[column_name] = encrypted_type.process_bind_param(
                 unencrypted_value,
@@ -193,3 +191,13 @@ class SecretsMigrator:
                 for row in rows:
                     self._re_encrypt_row(conn, row, table_name, columns)
         logger.info("All tables processed")
+
+
+def password_encrypt(password="t1)*>(T0mAjz"):
+    return generate_password_hash(password, method='pbkdf2:sha256', salt_length=16)
+
+
+def md5(text_str):
+    hl = hashlib.md5()
+    hl.update(text_str.encode(encoding='utf-8'))
+    return hl.hexdigest()

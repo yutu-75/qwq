@@ -53,7 +53,7 @@ class AdvancedDataTypeRestApi(BaseSupersetApi):
 
     @protect()
     @safe
-    @expose("/convert", methods=("GET",))
+    @expose("/convert", methods=["GET"])
     @permission_name("read")
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get",
@@ -61,12 +61,11 @@ class AdvancedDataTypeRestApi(BaseSupersetApi):
     )
     @rison(advanced_data_type_convert_schema)
     def get(self, **kwargs: Any) -> Response:
-        """Return an AdvancedDataTypeResponse object populated with the passed in args.
+        """Returns a AdvancedDataTypeResponse object populated with the passed in args
         ---
         get:
-          summary: Return an AdvancedDataTypeResponse
-          description: >-
-            Returns an AdvancedDataTypeResponse object populated with the passed in args.
+          summary: >-
+            Returns a AdvancedDataTypeResponse object populated with the passed in args.
           parameters:
           - in: query
             name: q
@@ -112,17 +111,18 @@ class AdvancedDataTypeRestApi(BaseSupersetApi):
 
     @protect()
     @safe
-    @expose("/types", methods=("GET",))
+    @expose("/types", methods=["GET"])
     @permission_name("read")
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get",
         log_to_statsd=False,  # pylint: disable-arguments-renamed
     )
     def get_types(self) -> Response:
-        """Return a list of available advanced data types.
+        """Returns a list of available advanced data types
         ---
         get:
-          summary: Return a list of available advanced data types
+          description: >-
+            Returns a list of available advanced data types.
           responses:
             200:
               description: >-
@@ -144,4 +144,5 @@ class AdvancedDataTypeRestApi(BaseSupersetApi):
             500:
               $ref: '#/components/responses/500'
         """
+
         return self.response(200, result=list(ADVANCED_DATA_TYPES.keys()))

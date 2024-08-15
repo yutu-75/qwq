@@ -24,17 +24,17 @@ from superset.models.helpers import AuditMixinNullable, ImportExportMixin
 VALUE_MAX_SIZE = 2**24 - 1
 
 
-class KeyValueEntry(AuditMixinNullable, ImportExportMixin, Model):
+class KeyValueEntry(Model, AuditMixinNullable, ImportExportMixin):
     """Key value store entity"""
 
     __tablename__ = "key_value"
     id = Column(Integer, primary_key=True)
-    resource = Column(String(32), nullable=False)
-    value = Column(LargeBinary(length=VALUE_MAX_SIZE), nullable=False)
-    created_on = Column(DateTime, nullable=True)
+    resource = Column(String(32), nullable=False, comment='资源名称')
+    value = Column(LargeBinary(length=VALUE_MAX_SIZE), nullable=False, comment='值')
+    created_on = Column(DateTime, nullable=True, comment='创建时间')
     created_by_fk = Column(Integer, ForeignKey("ab_user.id"), nullable=True)
-    changed_on = Column(DateTime, nullable=True)
-    expires_on = Column(DateTime, nullable=True)
+    changed_on = Column(DateTime, nullable=True, comment='更新时间')
+    expires_on = Column(DateTime, nullable=True, comment='过期时间')
     changed_by_fk = Column(Integer, ForeignKey("ab_user.id"), nullable=True)
     created_by = relationship(security_manager.user_model, foreign_keys=[created_by_fk])
     changed_by = relationship(security_manager.user_model, foreign_keys=[changed_by_fk])

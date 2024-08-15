@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+  <defs>
+    <style>
+      .a {
+        fill: none;
+      }
+
+      .b {
+        fill: currentColor;
+      }
+    </style>
+  </defs>
+  <path class="a" d="M0,0H20V20H0Z" />
+  <path class="b"
+    d="M3.667,7.167H17v-2.5H3.667ZM12,16.333v-7.5H8.667v7.5Zm1.667,0H17v-7.5H13.667ZM7,16.333v-7.5H3.667v7.5ZM2.833,3h15a.833.833,0,0,1,.833.833V17.167a.833.833,0,0,1-.833.833h-15A.833.833,0,0,1,2,17.167V3.833A.833.833,0,0,1,2.833,3Z"
+    transform="translate(0 -0.5)" />
+</svg>

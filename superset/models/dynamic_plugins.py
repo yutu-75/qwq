@@ -15,17 +15,20 @@
 # specific language governing permissions and limitations
 # under the License.
 from flask_appbuilder import Model
-from sqlalchemy import Column, Integer, Text
-
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+)
 from superset.models.helpers import AuditMixinNullable
 
 
 class DynamicPlugin(Model, AuditMixinNullable):
     id = Column(Integer, primary_key=True)
-    name = Column(Text, unique=True, nullable=False)
+    name = Column(String(255), unique=True, nullable=False, comment='名称')
     # key corresponds to viz_type from static plugins
-    key = Column(Text, unique=True, nullable=False)
-    bundle_url = Column(Text, unique=True, nullable=False)
+    key = Column(String(255), unique=True, nullable=False, comment='唯一键')
+    bundle_url = Column(String(255), unique=True, nullable=False, comment='绑定的 url')
 
     def __repr__(self) -> str:
         return str(self.name)

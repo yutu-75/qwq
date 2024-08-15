@@ -14,7 +14,6 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# pylint: disable=too-many-lines
 import json
 import logging
 from datetime import datetime
@@ -22,17 +21,30 @@ from io import BytesIO
 from typing import Any
 from zipfile import is_zipfile, ZipFile
 
-from flask import request, Response, send_file
+import pandas as pd
+import yaml
+from flask import request, Response, send_file, g, flash
 from flask_appbuilder.api import expose, protect, rison, safe
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from flask_babel import ngettext
 from marshmallow import ValidationError
+from flask_appbuilder.const import API_SELECT_COLUMNS_RIS_KEY, API_RESULT_RES_KEY
+from sqlalchemy import create_engine
 
-from superset import event_logger
-from superset.commands.dataset.create import CreateDatasetCommand
-from superset.commands.dataset.delete import DeleteDatasetCommand
-from superset.commands.dataset.duplicate import DuplicateDatasetCommand
-from superset.commands.dataset.exceptions import (
+from superset import event_logger, is_feature_enabled, db, app
+from superset.commands.importers.exceptions import NoValidFilesFoundError
+from superset.commands.importers.v1.utils import get_contents_from_bundle
+from superset import conf
+from superset.connectors.sqla.models import SqlaTable, TableColumn, DatasetCategory
+from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP, RouteMethod
+from superset.dao.exceptions import DatasourceTypeNotSupportedError, DatasourceNotFound
+from superset.databases.filters import DatabaseFilter
+from superset.datasets.commands.bulk_delete import BulkDeleteDatasetCommand
+from superset.datasets.commands.create import CreateDatasetCommand
+from superset.datasets.commands.delete import DeleteDatasetCommand
+from superset.datasets.commands.duplicate import DuplicateDatasetCommand
+from superset.datasets.commands.exceptions import (
+    DatasetBulkDeleteFailedError,
     DatasetCreateFailedError,
     DatasetDeleteFailedError,
     DatasetForbiddenError,
@@ -41,22 +53,13 @@ from superset.commands.dataset.exceptions import (
     DatasetRefreshFailedError,
     DatasetUpdateFailedError,
 )
-from superset.commands.dataset.export import ExportDatasetsCommand
-from superset.commands.dataset.importers.dispatcher import ImportDatasetsCommand
-from superset.commands.dataset.refresh import RefreshDatasetCommand
-from superset.commands.dataset.update import UpdateDatasetCommand
-from superset.commands.dataset.warm_up_cache import DatasetWarmUpCacheCommand
-from superset.commands.exceptions import CommandException
-from superset.commands.importers.exceptions import NoValidFilesFoundError
-from superset.commands.importers.v1.utils import get_contents_from_bundle
-from superset.connectors.sqla.models import SqlaTable
-from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP, RouteMethod
-from superset.daos.dataset import DatasetDAO
-from superset.databases.filters import DatabaseFilter
+from superset.datasets.commands.export import ExportDatasetsCommand
+from superset.datasets.commands.importers.dispatcher import ImportDatasetsCommand
+from superset.datasets.commands.refresh import RefreshDatasetCommand
+from superset.datasets.commands.update import UpdateDatasetCommand
+from superset.datasets.dao import DatasetDAO
 from superset.datasets.filters import DatasetCertifiedFilter, DatasetIsNullOrEmptyFilter
 from superset.datasets.schemas import (
-    DatasetCacheWarmUpRequestSchema,
-    DatasetCacheWarmUpResponseSchema,
     DatasetDuplicateSchema,
     DatasetPostSchema,
     DatasetPutSchema,
@@ -64,10 +67,15 @@ from superset.datasets.schemas import (
     get_delete_ids_schema,
     get_export_ids_schema,
     GetOrCreateDatasetSchema,
-    openapi_spec_methods_override,
 )
-from superset.utils.core import parse_boolean_string
-from superset.views.base import DatasourceFilter
+from superset.datasource.api import DatasourceRestApi
+from superset.datasource.dao import DatasourceDAO
+from superset.exceptions import SupersetSecurityException
+from superset.models.core import Database
+from superset.utils.core import parse_boolean_string, DatasourceType, \
+    apply_max_row_limit
+from superset.v2.datasets.commands.get_data_command import DatasetDataCommand
+from superset.views.base import DatasourceFilter, generate_download_headers
 from superset.views.base_api import (
     BaseSupersetModelRestApi,
     RelatedFieldFilter,
@@ -79,11 +87,14 @@ from superset.views.filters import BaseFilterRelatedUsers, FilterRelatedOwners
 
 logger = logging.getLogger(__name__)
 
+database_database_name = "database.database_name"
+changed_by_first_name = "changed_by.first_name"
+Error_creating = "Error creating model %s: %s"
+
 
 class DatasetRestApi(BaseSupersetModelRestApi):
     datamodel = SQLAInterface(SqlaTable)
     base_filters = [["id", DatasourceFilter, lambda: []]]
-
     resource_name = "dataset"
     allow_browser_login = True
     class_permission_name = "Dataset"
@@ -98,16 +109,18 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "related_objects",
         "duplicate",
         "get_or_create_dataset",
-        "warm_up_cache",
+        "get_column_data",
+        "save_column",
+        "edit_column"
     }
     list_columns = [
         "id",
         "database.id",
-        "database.database_name",
+        database_database_name,
         "changed_by_name",
-        "changed_by.first_name",
-        "changed_by.last_name",
-        "changed_by.id",
+        "changed_by_url",
+        changed_by_first_name,
+        "changed_by.username",
         "changed_on_utc",
         "changed_on_delta_humanized",
         "default_endpoint",
@@ -117,6 +130,7 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "extra",
         "kind",
         "owners.id",
+        "owners.username",
         "owners.first_name",
         "owners.last_name",
         "schema",
@@ -127,13 +141,14 @@ class DatasetRestApi(BaseSupersetModelRestApi):
     order_columns = [
         "table_name",
         "schema",
-        "changed_by.first_name",
+        changed_by_first_name,
         "changed_on_delta_humanized",
-        "database.database_name",
+        database_database_name,
     ]
     show_select_columns = [
         "id",
-        "database.database_name",
+        database_database_name,
+        "database.verbose_name",
         "database.id",
         "table_name",
         "sql",
@@ -142,8 +157,6 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "schema",
         "description",
         "main_dttm_col",
-        "normalize_columns",
-        "always_filter_main_dttm",
         "offset",
         "default_endpoint",
         "cache_timeout",
@@ -151,6 +164,7 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "template_params",
         "select_star",
         "owners.id",
+        "owners.username",
         "owners.first_name",
         "owners.last_name",
         "columns.advanced_data_type",
@@ -169,10 +183,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "columns.type",
         "columns.uuid",
         "columns.verbose_name",
+        "columns.is_cross_field",
+        "metrics",  # TODO(john-bodley): Deprecate in 3.0.
         "metrics.changed_on",
         "metrics.created_on",
         "metrics.d3format",
-        "metrics.currency",
         "metrics.description",
         "metrics.expression",
         "metrics.extra",
@@ -185,29 +200,34 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "url",
         "extra",
         "kind",
+        "custom_name",  # 增加的属性用于编辑时数据集同步
+        "type_classify",
+        "table_group_id",
         "created_on",
         "created_on_humanized",
         "created_by.first_name",
         "created_by.last_name",
         "changed_on",
         "changed_on_humanized",
-        "changed_by.first_name",
+        changed_by_first_name,
         "changed_by.last_name",
+        "categories.id",
+        "categories.table_name",
+        "categories.first_cate_field",
+        "categories.second_cate_field",
+        "categories.field_name",
+        "categories.field_code",
+        "categories.is_cross_field",
+        "categories.database_name",
+        "categories.database_id",
+        "categories.category_type",
+        "categories.is_fast_filter",
     ]
     show_columns = show_select_columns + [
         "columns.type_generic",
         "database.backend",
         "columns.advanced_data_type",
         "is_managed_externally",
-        "uid",
-        "datasource_name",
-        "name",
-        "column_formats",
-        "currency_formats",
-        "granularity_sqla",
-        "time_grain_sqla",
-        "order_by_choices",
-        "verbose_map",
     ]
     add_model_schema = DatasetPostSchema()
     edit_model_schema = DatasetPutSchema()
@@ -221,8 +241,6 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "schema",
         "description",
         "main_dttm_col",
-        "normalize_columns",
-        "always_filter_main_dttm",
         "offset",
         "default_endpoint",
         "cache_timeout",
@@ -247,37 +265,23 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         "sql": [DatasetIsNullOrEmptyFilter],
         "id": [DatasetCertifiedFilter],
     }
-    search_columns = [
-        "id",
-        "database",
-        "owners",
-        "schema",
-        "sql",
-        "table_name",
-        "created_by",
-        "changed_by",
-    ]
-    allowed_rel_fields = {"database", "owners", "created_by", "changed_by"}
+    search_columns = ["id", "database", "owners", "schema", "sql", "table_name"]
+    allowed_rel_fields = {"database", "owners"}
     allowed_distinct_fields = {"schema"}
 
     apispec_parameter_schemas = {
         "get_export_ids_schema": get_export_ids_schema,
     }
     openapi_spec_component_schemas = (
-        DatasetCacheWarmUpRequestSchema,
-        DatasetCacheWarmUpResponseSchema,
         DatasetRelatedObjectsResponse,
         DatasetDuplicateSchema,
         GetOrCreateDatasetSchema,
     )
 
-    openapi_spec_methods = openapi_spec_methods_override
-    """ Overrides GET methods OpenApi descriptions """
-
     list_outer_default_load = True
     show_outer_default_load = True
 
-    @expose("/", methods=("POST",))
+    @expose("/", methods=["POST"])
     @protect()
     @safe
     @statsd_metrics
@@ -287,10 +291,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
     )
     @requires_json
     def post(self) -> Response:
-        """Create a new dataset.
+        """Creates a new Dataset
         ---
         post:
-          summary: Create a new dataset
+          description: >-
+            Create a new Dataset
           requestBody:
             description: Dataset schema
             required: true
@@ -327,20 +332,135 @@ class DatasetRestApi(BaseSupersetModelRestApi):
 
         try:
             new_model = CreateDatasetCommand(item).run()
-            return self.response(201, id=new_model.id, result=item, data=new_model.data)
+            return self.response(201, id=new_model.id, result=item)
         except DatasetInvalidError as ex:
             return self.response_422(message=ex.normalized_messages())
         except DatasetCreateFailedError as ex:
             logger.error(
-                "Error creating model %s: %s",
+                Error_creating,
                 self.__class__.__name__,
                 str(ex),
                 exc_info=True,
             )
             return self.response_422(message=str(ex))
 
-    @expose("/<pk>", methods=("PUT",))
+    @expose("/<pk>", methods=["GET"])
     @protect()
+    def get(self, pk, **kwargs):
+        """Get list of items from Model
+        ---
+        get:
+          description: >-
+            Get a list of models
+          parameters:
+          - in: query
+            name: q
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/get_list_schema'
+          responses:
+            200:
+              description: Items from Model
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      label_columns:
+                        type: object
+                        properties:
+                          column_name:
+                            description: >-
+                              The label for the column name.
+                              Will be translated by babel
+                            example: A Nice label for the column
+                            type: string
+                      list_columns:
+                        description: >-
+                          A list of columns
+                        type: array
+                        items:
+                          type: string
+                      description_columns:
+                        type: object
+                        properties:
+                          column_name:
+                            description: >-
+                              The description for the column name.
+                              Will be translated by babel
+                            example: A Nice description for the column
+                            type: string
+                      list_title:
+                        description: >-
+                          A title to render.
+                          Will be translated by babel
+                        example: List Items
+                        type: string
+                      ids:
+                        description: >-
+                          A list of item ids, useful when you don't know the column id
+                        type: array
+                        items:
+                          type: string
+                      count:
+                        description: >-
+                          The total record count on the backend
+                        type: number
+                      order_columns:
+                        description: >-
+                          A list of allowed columns to sort
+                        type: array
+                        items:
+                          type: string
+                      result:
+                        description: >-
+                          The result from the get list query
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/{{self.__class__.__name__}}.get_list'  # noqa
+            400:
+              $ref: '#/components/responses/400'
+            401:
+              $ref: '#/components/responses/401'
+            422:
+              $ref: '#/components/responses/422'
+            500:
+              $ref: '#/components/responses/500'
+        """
+        item = self.datamodel.get(
+            pk,
+            select_columns=self.show_select_columns,
+            outer_default_load=self.show_outer_default_load,
+        )
+        if not item:
+            return self.response_404()
+
+        datasource_name = item.database_datasource_name
+
+        response = {}
+
+        args = kwargs.get("rison", {})
+        select_cols = args.get(API_SELECT_COLUMNS_RIS_KEY, [])
+        pruned_select_cols = [col for col in select_cols if col in self.show_columns]
+        self.set_response_key_mappings(
+            response, self.get, args, **{API_SELECT_COLUMNS_RIS_KEY: pruned_select_cols}
+        )
+        if pruned_select_cols:
+            show_model_schema = self.model2schemaconverter.convert(pruned_select_cols)
+        else:
+            show_model_schema = self.show_model_schema
+
+        response["id"] = pk
+        response[API_RESULT_RES_KEY] = show_model_schema.dump(item, many=False)
+        # 显示datasource name
+        response["result"]["database"]["datasource_name"] = datasource_name
+        self.pre_get(response)
+        return self.response(200, **response)
+
+    @expose("/<pk>", methods=["PUT"])
+    @protect()
+    @safe
     @statsd_metrics
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.put",
@@ -348,10 +468,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
     )
     @requires_json
     def put(self, pk: int) -> Response:
-        """Update a dataset.
+        """Changes a Dataset
         ---
         put:
-          summary: Update a dataset
+          description: >-
+            Changes a Dataset
           parameters:
           - in: path
             schema:
@@ -424,7 +545,7 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             response = self.response_422(message=str(ex))
         return response
 
-    @expose("/<pk>", methods=("DELETE",))
+    @expose("/<pk>", methods=["DELETE"])
     @protect()
     @safe
     @statsd_metrics
@@ -433,10 +554,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def delete(self, pk: int) -> Response:
-        """Delete a Dataset.
+        """Deletes a Dataset
         ---
         delete:
-          summary: Delete a dataset
+          description: >-
+            Deletes a Dataset
           parameters:
           - in: path
             schema:
@@ -464,7 +586,7 @@ class DatasetRestApi(BaseSupersetModelRestApi):
               $ref: '#/components/responses/500'
         """
         try:
-            DeleteDatasetCommand([pk]).run()
+            DeleteDatasetCommand(pk).run()
             return self.response(200, message="OK")
         except DatasetNotFoundError:
             return self.response_404()
@@ -479,20 +601,17 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             )
             return self.response_422(message=str(ex))
 
-    @expose("/export/", methods=("GET",))
+    @expose("/export/", methods=["GET"])
     @protect()
     @safe
     @statsd_metrics
     @rison(get_export_ids_schema)
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.export",
-        log_to_statsd=False,
-    )
     def export(self, **kwargs: Any) -> Response:
-        """Download multiple datasets as YAML files.
+        """Export datasets
         ---
         get:
-          summary: Download multiple datasets as YAML files
+          description: >-
+            Exports multiple datasets and downloads them as YAML files
           parameters:
           - in: query
             name: q
@@ -518,33 +637,51 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         """
         requested_ids = kwargs["rison"]
 
-        timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
-        root = f"dataset_export_{timestamp}"
-        filename = f"{root}.zip"
+        if is_feature_enabled("VERSIONED_EXPORT"):
+            token = request.args.get("token")
+            timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+            root = f"dataset_export_{timestamp}"
+            filename = f"{root}.zip"
 
-        buf = BytesIO()
-        with ZipFile(buf, "w") as bundle:
-            try:
-                for file_name, file_content in ExportDatasetsCommand(
-                    requested_ids
-                ).run():
-                    with bundle.open(f"{root}/{file_name}", "w") as fp:
-                        fp.write(file_content.encode())
-            except DatasetNotFoundError:
-                return self.response_404()
-        buf.seek(0)
+            buf = BytesIO()
+            with ZipFile(buf, "w") as bundle:
+                try:
+                    for file_name, file_content in ExportDatasetsCommand(
+                        requested_ids
+                    ).run():
+                        with bundle.open(f"{root}/{file_name}", "w") as fp:
+                            fp.write(file_content.encode())
+                except DatasetNotFoundError:
+                    return self.response_404()
+            buf.seek(0)
 
-        response = send_file(
-            buf,
-            mimetype="application/zip",
-            as_attachment=True,
-            download_name=filename,
+            response = send_file(
+                buf,
+                mimetype="application/zip",
+                as_attachment=True,
+                download_name=filename,
+            )
+            if token:
+                response.set_cookie(token, "done", max_age=600)
+            return response
+
+        query = self.datamodel.session.query(SqlaTable).filter(
+            SqlaTable.id.in_(requested_ids)
         )
-        if token := request.args.get("token"):
-            response.set_cookie(token, "done", max_age=600)
-        return response
+        query = self._base_filters.apply_all(query)
+        items = query.all()
+        ids = [item.id for item in items]
+        if len(ids) != len(requested_ids):
+            return self.response_404()
 
-    @expose("/duplicate", methods=("POST",))
+        data = [t.export_to_dict() for t in items]
+        return Response(
+            yaml.safe_dump(data),
+            headers=generate_download_headers("yaml"),
+            mimetype="application/text",
+        )
+
+    @expose("/duplicate", methods=["POST"])
     @protect()
     @safe
     @statsd_metrics
@@ -554,10 +691,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
     )
     @requires_json
     def duplicate(self) -> Response:
-        """Duplicate a dataset.
+        """Duplicates a Dataset
         ---
         post:
-          summary: Duplicate a dataset
+          description: >-
+            Duplicates a Dataset
           requestBody:
             description: Dataset schema
             required: true
@@ -607,14 +745,14 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             )
         except DatasetCreateFailedError as ex:
             logger.error(
-                "Error creating model %s: %s",
+                Error_creating,
                 self.__class__.__name__,
                 str(ex),
                 exc_info=True,
             )
             return self.response_422(message=str(ex))
 
-    @expose("/<pk>/refresh", methods=("PUT",))
+    @expose("/<pk>/refresh", methods=["PUT"])
     @protect()
     @safe
     @statsd_metrics
@@ -623,10 +761,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def refresh(self, pk: int) -> Response:
-        """Refresh and update columns of a dataset.
+        """Refresh a Dataset
         ---
         put:
-          summary: Refresh and update columns of a dataset
+          description: >-
+            Refreshes and updates columns of a dataset
           parameters:
           - in: path
             schema:
@@ -669,20 +808,21 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             )
             return self.response_422(message=str(ex))
 
-    @expose("/<pk>/related_objects", methods=("GET",))
+    @expose("/<pk>/related_objects", methods=["GET"])
     @protect()
     @safe
     @statsd_metrics
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".related_objects",
+                                             f".related_objects",
         log_to_statsd=False,
     )
     def related_objects(self, pk: int) -> Response:
-        """Get charts and dashboards count associated to a dataset.
+        """Get charts and dashboards count associated to a dataset
         ---
         get:
-          summary: Get charts and dashboards count associated to a dataset
+          description:
+            Get charts and dashboards count associated to a dataset
           parameters:
           - in: path
             name: pk
@@ -730,7 +870,7 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             dashboards={"count": len(dashboards), "result": dashboards},
         )
 
-    @expose("/", methods=("DELETE",))
+    @expose("/", methods=["DELETE"])
     @protect()
     @safe
     @statsd_metrics
@@ -740,10 +880,11 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def bulk_delete(self, **kwargs: Any) -> Response:
-        """Bulk delete datasets.
+        """Delete bulk Datasets
         ---
         delete:
-          summary: Bulk delete datasets
+          description: >-
+            Deletes multiple Datasets in a bulk operation.
           parameters:
           - in: query
             name: q
@@ -776,7 +917,7 @@ class DatasetRestApi(BaseSupersetModelRestApi):
         """
         item_ids = kwargs["rison"]
         try:
-            DeleteDatasetCommand(item_ids).run()
+            BulkDeleteDatasetCommand(item_ids).run()
             return self.response(
                 200,
                 message=ngettext(
@@ -789,22 +930,26 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             return self.response_404()
         except DatasetForbiddenError:
             return self.response_403()
-        except DatasetDeleteFailedError as ex:
+        except DatasetBulkDeleteFailedError as ex:
             return self.response_422(message=str(ex))
 
-    @expose("/import/", methods=("POST",))
+    @expose("/import/", methods=["POST"])
     @protect()
     @statsd_metrics
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.import_",
-        log_to_statsd=False,
-    )
     @requires_form_data
     def import_(self) -> Response:
-        """Import dataset(s) with associated databases.
+        """Import dataset(s) with associated databases
         ---
         post:
-          summary: Import dataset(s) with associated databases
+          parameters:
+          - in: query
+            schema:
+              type: integer
+            name: datasource_group_id
+          - in: query
+            schema:
+              type: integer
+            name: dataset_group_id
           requestBody:
             required: true
             content:
@@ -833,30 +978,6 @@ class DatasetRestApi(BaseSupersetModelRestApi):
                     sync_metrics:
                       description: sync metrics?
                       type: boolean
-                    ssh_tunnel_passwords:
-                      description: >-
-                        JSON map of passwords for each ssh_tunnel associated to a
-                        featured database in the ZIP file. If the ZIP includes a
-                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
-                        the password should be provided in the following format:
-                        `{"databases/MyDatabase.yaml": "my_password"}`.
-                      type: string
-                    ssh_tunnel_private_keys:
-                      description: >-
-                        JSON map of private_keys for each ssh_tunnel associated to a
-                        featured database in the ZIP file. If the ZIP includes a
-                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
-                        the private_key should be provided in the following format:
-                        `{"databases/MyDatabase.yaml": "my_private_key"}`.
-                      type: string
-                    ssh_tunnel_private_key_passwords:
-                      description: >-
-                        JSON map of private_key_passwords for each ssh_tunnel associated
-                        to a featured database in the ZIP file. If the ZIP includes a
-                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
-                        the private_key should be provided in the following format:
-                        `{"databases/MyDatabase.yaml": "my_private_key_password"}`.
-                      type: string
           responses:
             200:
               description: Dataset import result
@@ -894,24 +1015,14 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             if "passwords" in request.form
             else None
         )
-        overwrite = request.form.get("overwrite") == "true"
+        overwrite = (
+            request.form.get("overwrite") == "true" or
+            request.form.get("overwrite") == "覆盖"
+        )
         sync_columns = request.form.get("sync_columns") == "true"
         sync_metrics = request.form.get("sync_metrics") == "true"
-        ssh_tunnel_passwords = (
-            json.loads(request.form["ssh_tunnel_passwords"])
-            if "ssh_tunnel_passwords" in request.form
-            else None
-        )
-        ssh_tunnel_private_keys = (
-            json.loads(request.form["ssh_tunnel_private_keys"])
-            if "ssh_tunnel_private_keys" in request.form
-            else None
-        )
-        ssh_tunnel_priv_key_passwords = (
-            json.loads(request.form["ssh_tunnel_private_key_passwords"])
-            if "ssh_tunnel_private_key_passwords" in request.form
-            else None
-        )
+        datasource_group_id = int(request.form.get("datasource_group_id", 0)),
+        dataset_group_id = int(request.form.get("dataset_group_id", 0))
 
         command = ImportDatasetsCommand(
             contents,
@@ -919,24 +1030,23 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             overwrite=overwrite,
             sync_columns=sync_columns,
             sync_metrics=sync_metrics,
-            ssh_tunnel_passwords=ssh_tunnel_passwords,
-            ssh_tunnel_private_keys=ssh_tunnel_private_keys,
-            ssh_tunnel_priv_key_passwords=ssh_tunnel_priv_key_passwords,
+            datasource_group_id=datasource_group_id,
+            dataset_group_id=dataset_group_id
         )
         command.run()
         return self.response(200, message="OK")
 
-    @expose("/get_or_create/", methods=("POST",))
+    @expose("/get_or_create/", methods=["POST"])
     @protect()
     @safe
     @statsd_metrics
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".get_or_create_dataset",
+                                             f".get_or_create_dataset",
         log_to_statsd=False,
     )
     def get_or_create_dataset(self) -> Response:
-        """Retrieve a dataset by name, or create it if it does not exist.
+        """Retrieve a dataset by name, or create it if it does not exist
         ---
         post:
           summary: Retrieve a table by name, or create it if it does not exist
@@ -974,7 +1084,8 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             return self.response(400, message=ex.messages)
         table_name = body["table_name"]
         database_id = body["database_id"]
-        if table := DatasetDAO.get_table_by_name(database_id, table_name):
+        table = DatasetDAO.get_table_by_name(database_id, table_name)
+        if table:
             return self.response(200, result={"table_id": table.id})
 
         body["database"] = database_id
@@ -985,66 +1096,332 @@ class DatasetRestApi(BaseSupersetModelRestApi):
             return self.response_422(message=ex.normalized_messages())
         except DatasetCreateFailedError as ex:
             logger.error(
-                "Error creating model %s: %s",
+                Error_creating,
                 self.__class__.__name__,
                 str(ex),
                 exc_info=True,
             )
             return self.response_422(message=ex.message)
 
-    @expose("/warm_up_cache", methods=("PUT",))
+    @expose("/<pk>/get_column_data/", methods=['POST'])
     @protect()
     @safe
     @statsd_metrics
     @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".warm_up_cache",
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.post",
         log_to_statsd=False,
     )
-    def warm_up_cache(self) -> Response:
-        """Warm up the cache for each chart powered by the given table.
-        ---
-        put:
-          summary: Warm up the cache for each chart powered by the given table
-          description: >-
-            Warms up the cache for the table.
-            Note for slices a force refresh occurs.
-            In terms of the `extra_filters` these can be obtained from records in the JSON
-            encoded `logs.json` column associated with the `explore_json` action.
-          requestBody:
-            description: >-
-              Identifies the database and table to warm up cache for, and any
-              additional dashboard or filter context to use.
-            required: true
-            content:
-              application/json:
-                schema:
-                  $ref: "#/components/schemas/DatasetCacheWarmUpRequestSchema"
-          responses:
-            200:
-              description: Each chart's warmup status
-              content:
-                application/json:
-                  schema:
-                    $ref: "#/components/schemas/DatasetCacheWarmUpResponseSchema"
-            400:
-              $ref: '#/components/responses/400'
-            404:
-              $ref: '#/components/responses/404'
-            500:
-              $ref: '#/components/responses/500'
-        """
+    def get_column_data(self, pk: int):
+        """Select the label field in the data source to which you access, and assign
+        a new data label by grouping"""
         try:
-            body = DatasetCacheWarmUpRequestSchema().load(request.json)
-        except ValidationError as error:
-            return self.response_400(message=error.messages)
+            base_column = request.json.get('base_column')  # 选择的列名
+            result = distinct_data_get(self, pk, base_column)
+            is_all_text = all(isinstance(item, str) for item in result)
+            is_all_num = all(isinstance(item, (int, float)) for item in result)
+            if is_all_text:
+                return self.response(200, result={
+                    "type": 0,
+                    "distinct_values": result,
+                })
+            elif is_all_num:
+                max_value = max(result)
+                min_value = min(result)
+                return self.response(200, result={
+                    "type": 1,
+                    "range_values": f"{min_value}～{max_value}",
+                })
+            else:
+                return self.response(200, result={
+                    "type": 2,
+                    "values": "列类型无效",
+                })
+        except ValueError as e:
+            response_dict = {
+                "message": str(e)
+            }
+            return self.response(400, result=response_dict)
+
+    @expose("/<pk>/save_column/", methods=['POST'])
+    @protect()
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.post",
+        log_to_statsd=False,
+    )
+    def save_column(self, pk: int):
+        '''
+        {
+          "column_name": "测试赋值列",
+          "base_column": "a1",
+          "data":{
+            "type":"text",
+            "data": [
+              {
+                "name":"分组名1"
+                "value":["个体工商户", "事业单位"]
+              }
+              {
+                "name":"分组名2"
+                "value":["国家党政机关", "社会团体"]
+              }
+            ]
+          }
+            ]
+          }
+        }
+        '''
         try:
-            result = DatasetWarmUpCacheCommand(
-                body["db_name"],
-                body["table_name"],
-                body.get("dashboard_id"),
-                body.get("extra_filters"),
-            ).run()
-            return self.response(200, result=result)
-        except CommandException as ex:
-            return self.response(ex.status, message=ex.message)
+            column_id = request.json.get('code_id')
+            column_name = request.json.get('column_name')  # 赋值列名
+            base_column = request.json.get('base_column')  # 选择的列名
+            dataset_query = DatasetDAO.find_dataset_column_by_name(pk, base_column)
+            column_type_1 = dataset_query.type.upper()  # 获取该列数据类型
+            column_type = request.json.get('types')  # 获取该列数据类型
+            echo_data = request.get_json()  # 编辑时的回显数据
+            group_data = request.json.get('exitData')  # 列表数据
+            range_values = request.json.get('range_values')
+            '''
+            模拟保存数据格式
+            {
+                "column_name": "测试赋值列_399",
+                "base_column": "gender",
+                "data":{
+                    "type":"VARCHAR(16)",
+                    "data_wei":["test"],
+                    "data": [
+                        {
+                            "name":"分组名1",
+                            "value":["girl"]
+                        },
+                        {
+                            "name":"分组名2",
+                            "value":["boy"]
+                        }
+                    ]
+                }
+            }
+            '''
+            sql_data = []
+            name_list = []
+            if column_type == '文本':
+                for group in group_data:
+                    group_name = group.get('name')
+                    if group_name in name_list:
+                        raise ValueError("无效的分组：分组名重复")
+                    else:
+                        name_list.append(group_name)
+                        data = "(" + ",".join(
+                            [f"\'{item}\'" for item in group.get('value')]) + ")"
+                        sql_data.append(
+                            f'WHEN `{base_column}` in {data} then "{group_name}"')
+                sql_data.append(f'ELSE "" END')
+                sql = 'case ' + ' '.join(sql_data)  # 生成sql，存入数据库
+
+            elif column_type == '数字':
+                # 输入值范围判断
+                min_range_value = float(range_values.split("～")[0])
+                max_range_value = float(range_values.split("～")[1])
+                # 给定的区间范围
+                range_value = [int(min_range_value), int(max_range_value)]
+
+                for group in group_data:
+                    group_name = group.get('name1')
+                    value_1 = group.get('value_1')
+                    option_1 = group.get('option_1')
+                    value_2 = group.get('value_2')
+                    option_2 = group.get('option_2')
+                    if group_name in name_list:
+                        raise ValueError("无效的分组：分组名重复")
+                    else:
+                        name_list.append(group_name)
+                        # 排除数值和符号为空
+                        if (value_1, value_2, option_2, option_1) is not None:
+                            # 排除区间范围为无穷区间：2<x>10
+                            if option_1[0] == option_2[0]:
+                                # 排除区间范围前后矛盾：1>x>10
+                                if value_1 > value_2 and option_1[0] == '>':
+                                    m = [value_2, value_1]
+                                # 排除区间范围前后矛盾：10<x<1
+                                elif value_1 < value_2 and option_1[0] == '<':
+                                    m = [value_1, value_2]
+                                else:
+                                    raise ValueError(
+                                        f"无效的分组：分组值范围选择错误,{str(value_1) + option_1}值{option_2 + str(value_2)} 不可取")
+
+                                # 排除掉单个分组区间完全包含给定区间range_value
+                                if len(range_value) == 0:
+                                    raise ValueError(
+                                        f"无效的分组：已存在分组完全包含{str(int(min_range_value)) +'～'+ str(int(max_range_value))}")
+                                # 当给定的范围区间range_value与输入的区间m相交时，减掉对应的交集
+                                elif type(range_value[0]) is int:
+                                    range_value = get_difference(self, range_value, m)
+
+                                # 当给定区间range_value中间断层时,将输入的区间m遍历所有区间进行划分，并减掉对应的交集
+                                else:
+                                    iterations = len(range_value)  # 控制迭代次数
+                                    for _ in range(iterations):
+                                        # 每次遍历删掉第一个区间range_value[0]
+                                        first_element = range_value.pop(0)
+                                        result = get_difference(self, first_element, m)
+
+                                        # 当result为空时，说明当前区间first_element被包含于m
+                                        if len(result) == 0:
+                                            m[0] = first_element[1]     # 此时，更改m区间值
+                                        # 当result为非断层区间[1,2]，说明当前区间first_element与m不相交
+                                        elif type(result[0]) is int:
+                                            range_value.append(result)
+                                        # 当result为断层区间[[1,2],[4,5]]，说明当前区间first_element与m相交，则减掉了相应的交集
+                                        else:
+                                            for i in result:
+                                                range_value.append(i)
+                                # 将区间范围值转为SQL语句
+                                data1 = str(value_1) + ' ' + option_1
+                                data2 = option_2 + ' ' + str(value_2)
+                                sql_data.append(
+                                    f'WHEN  {data1} `{base_column}` and `{base_column}` {data2} then "{group_name}"')
+                            else:
+                                raise ValueError("无效的分组：分组值范围选择错误,不可包含无穷区间")
+                        # elif value_1 and option_1 and not value_2 and not option_2:
+                        #     if min_range_values >= value_1 <= max_range_value:
+                        #         data1 = str(value_1) + ' ' + option_1
+                        #         sql_data.append(
+                        #             f'WHEN {data1} `{base_column}` then "{group_name}"')
+                        #     else:
+                        #         raise ValueError("无效的分组：分组值选择错误")
+                        # elif value_2 and option_2 and not value_1 and not option_1:
+                        #     if min_range_values >= value_2 <= max_range_value:
+                        #         data2 = option_2 + ' ' + str(value_2)
+                        #         sql_data.append(
+                        #             f'WHEN `{base_column}` {data2} then "{group_name}"')
+                        #     else:
+                        #         raise ValueError("无效的分组：分组值选择错误")
+                        else:
+                            raise ValueError("无效的分组：缺失数据值或范围符号")
+                if len(range_value) == 0:
+                    sql_data.append(f'ELSE "" END')
+                    sql = 'case ' + ' '.join(sql_data)  # 生成sql，存入数据库
+                else:
+                    raise ValueError("无效的分组：分组数据未全包含给定范围")
+            else:
+                raise ValueError("无效的列：该列类型错误")
+
+            new_data = {
+                "column_name": column_name,  # 赋值列名称
+                "table_id": pk,  # 数据集id
+                "computed_type": 1,  # 赋值列注释
+                "ref_column": base_column,  # 选择的列
+                "expr": json.dumps(echo_data),  # 回显数据内容
+                "expression": sql,  # sql
+                "type": column_type_1,  # 数据列类型
+            }
+
+            # 查找已经存在的赋值列
+            if column_id:
+                exist_column = (db.session.query(TableColumn).filter(
+                    TableColumn.id == column_id).one_or_none())
+                DatasetDAO.update_column(exist_column, new_data)
+                response_dict = {
+                    "message": '赋值列已成功修改',
+                    "column": new_data
+                }
+                return self.response(200, result=response_dict)
+            else:
+                try:
+                    DatasetDAO.create_column(new_data)
+                    response_dict = {
+                        "message": '赋值列已成功新建',
+                        "column": new_data
+                    }
+                except Exception as e:
+                    # 处理新建失败的异常
+                    error_message = str(e)
+                    return self.response(400, error=error_message)
+            return self.response(200, result=response_dict)
+
+        except ValueError as e:
+            # 处理列类型无效的异常
+            error_message = str(e)
+            return self.response(201, error=error_message)
+
+    @expose("/<pk>/edit_column/", methods=['POST'])
+    @protect()
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.post",
+        log_to_statsd=False,
+    )
+    def edit_column(self, pk: int):
+        try:
+            exist_column = (db.session.query(TableColumn).filter(
+                TableColumn.id == pk).one_or_none())
+            exist_column_dict = {
+                "column_name": exist_column.column_name,
+                "base_column": exist_column.ref_column,
+                "data": json.loads(exist_column.expr),
+                "type": exist_column.type
+            }
+            return self.response(200, result=exist_column_dict)
+        except ValueError as e:
+            # 处理列类型无效的异常
+            error_message = str(e)
+            return self.response(400, error=error_message)
+
+
+# 数据集单列去重
+def distinct_data_get(self, pk: int, base_column: str):
+    """
+    Gets detailed datasets information and returns.
+    """
+    datasource_type = "table"
+    try:
+        datasource = DatasourceDAO.get_datasource(
+            db.session, DatasourceType(datasource_type), pk
+        )
+        datasource.raise_for_access()
+    except ValueError:
+        return self.response(
+            400, message=f"Invalid datasource type: {datasource_type}"
+        )
+    except DatasourceTypeNotSupportedError as ex:
+        return self.response(400, message=ex.message)
+    except DatasourceNotFound as ex:
+        return self.response(404, message=ex.message)
+    except SupersetSecurityException as ex:
+        return self.response(403, message=ex.message)
+
+    row_limit = apply_max_row_limit(app.config["FILTER_SELECT_ROW_LIMIT"])
+    try:
+        payload = datasource.values_for_column(
+            column_name=base_column, limit=row_limit
+        )
+        return payload
+    except NotImplementedError:
+        return self.response(
+            400,
+            message=(
+                "Unable to get column values for "
+                f"datasource type: {datasource_type}"
+            ),
+        )
+
+
+# 区间相交判断，合集删除
+def get_difference(self, x: list, m: list):
+    result = []
+    try:
+        if x[1] < m[0] or m[1] < x[0]:  # 两个区间不相交
+            return x
+        else:  # 两个区间相交，计算差集
+            # 计算相交部分之外的部分
+            if x[0] < m[0]:
+                result.append([x[0], min(m[0], x[1])])
+            if x[1] > m[1]:
+                result.append([max(m[1], x[0]), x[1]])
+            return result
+    except ValueError as e:
+        # 处理列类型无效的异常
+        error_message = str(e)
+        return self.response(201, error=error_message)

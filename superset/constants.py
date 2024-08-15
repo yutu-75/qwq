@@ -20,14 +20,12 @@
 # string to use when None values *need* to be converted to/from strings
 from enum import Enum
 
-from superset.utils.backports import StrEnum
-
 USER_AGENT = "Apache Superset"
 
 NULL_STRING = "<NULL>"
 EMPTY_STRING = "<empty string>"
 
-CHANGE_ME_SECRET_KEY = "CHANGE_ME_TO_A_COMPLEX_RANDOM_SECRET"
+CHANGE_ME_SECRET_KEY = "tG5esXIVqp1TlnOF40zWW4zWxh7998zZy6M6aNIVCZNwSRn2T7kLfA2u"
 
 # UUID for the examples database
 EXAMPLES_DB_UUID = "a2dc77af-e654-49bb-b321-40f6b559a1ee"
@@ -40,6 +38,8 @@ QUERY_CANCEL_KEY = "cancel_query"
 QUERY_EARLY_CANCEL_KEY = "early_cancel_query"
 
 LRU_CACHE_MAX_SIZE = 256
+
+GET_DASHBOARD_VIEW_URL_FORMAT = "/superset/dashboard/{}/"
 
 
 class RouteMethod:  # pylint: disable=too-few-public-methods
@@ -84,6 +84,7 @@ class RouteMethod:  # pylint: disable=too-few-public-methods
     CRUD_SET = {ADD, LIST, EDIT, DELETE, ACTION_POST, SHOW}
     RELATED_VIEW_SET = {ADD, LIST, EDIT, DELETE}
     REST_MODEL_VIEW_CRUD_SET = {DELETE, GET, GET_LIST, POST, PUT, INFO}
+    READ_ONLY = {GET, GET_LIST, LIST}
 
 
 MODEL_VIEW_RW_METHOD_PERMISSION_MAP = {
@@ -127,11 +128,9 @@ MODEL_API_RW_METHOD_PERMISSION_MAP = {
     "select_star": "read",
     "table_metadata": "read",
     "table_extra_metadata": "read",
-    "test_connection": "write",
-    "validate_parameters": "write",
+    "test_connection": "read",
+    "validate_parameters": "read",
     "favorite_status": "read",
-    "add_favorite": "read",
-    "remove_favorite": "read",
     "thumbnail": "read",
     "import_": "write",
     "refresh": "write",
@@ -149,14 +148,6 @@ MODEL_API_RW_METHOD_PERMISSION_MAP = {
     "delete_ssh_tunnel": "write",
     "get_updated_since": "read",
     "stop_query": "read",
-    "get_user_slices": "read",
-    "schemas_access_for_file_upload": "read",
-    "get_objects": "read",
-    "get_all_objects": "read",
-    "add_objects": "write",
-    "delete_object": "write",
-    "copy_dash": "write",
-    "get_connection": "write",
 }
 
 EXTRA_FORM_DATA_APPEND_KEYS = {
@@ -169,6 +160,7 @@ EXTRA_FORM_DATA_APPEND_KEYS = {
 }
 
 EXTRA_FORM_DATA_OVERRIDE_REGULAR_MAPPINGS = {
+    "granularity": "granularity",
     "granularity_sqla": "granularity",
     "time_column": "time_column",
     "time_grain": "time_grain",
@@ -187,42 +179,166 @@ EXTRA_FORM_DATA_OVERRIDE_KEYS = (
 )
 
 
-class TimeGrain(StrEnum):
-    SECOND = "PT1S"
-    FIVE_SECONDS = "PT5S"
-    THIRTY_SECONDS = "PT30S"
-    MINUTE = "PT1M"
-    FIVE_MINUTES = "PT5M"
-    TEN_MINUTES = "PT10M"
-    FIFTEEN_MINUTES = "PT15M"
-    THIRTY_MINUTES = "PT30M"
-    HALF_HOUR = "PT0.5H"
-    HOUR = "PT1H"
-    SIX_HOURS = "PT6H"
-    DAY = "P1D"
-    WEEK = "P1W"
-    WEEK_STARTING_SUNDAY = "1969-12-28T00:00:00Z/P1W"
-    WEEK_STARTING_MONDAY = "1969-12-29T00:00:00Z/P1W"
-    WEEK_ENDING_SATURDAY = "P1W/1970-01-03T00:00:00Z"
-    WEEK_ENDING_SUNDAY = "P1W/1970-01-04T00:00:00Z"
-    MONTH = "P1M"
-    QUARTER = "P3M"
-    QUARTER_YEAR = "P0.25Y"
-    YEAR = "P1Y"
-
-
 class PandasAxis(int, Enum):
     ROW = 0
     COLUMN = 1
 
 
-class PandasPostprocessingCompare(StrEnum):
+class PandasPostprocessingCompare(str, Enum):
     DIFF = "difference"
     PCT = "percentage"
     RAT = "ratio"
 
 
-class CacheRegion(StrEnum):
+class CacheRegion(str, Enum):
     DEFAULT = "default"
     DATA = "data"
     THUMBNAIL = "thumbnail"
+
+
+VIEW = 1
+ALL_VIEW = 1.5
+EXPORT = 2
+ALL_EXPORT = 3
+MANAGE = 4
+ALL_MANAGE = 5
+GRANT = 8
+ALL_GRANT = 9
+ROW_COL_SECURITY = 6
+ALL_ROW_COL_SECURITY = 7
+
+
+class AuthSourceType(str, Enum):
+    DASHBOARD = "dashboard"
+    DASHBOARD_GROUP = "dashboard_group"
+    CHART = "chart"
+    CHART_GROUP = "chart_group"
+    DATASET = "dataset"
+    DATASET_GROUP = "dataset_group"
+    DATABASE_SYNC = "database sync"
+    DATABASE_SYNC_GROUP = "database sync_group"
+    DATASOURCE = "datasource"
+    DATASOURCE_GROUP = "datasource_group"
+    MENU = "menu"
+
+
+class AuthTargetType(str, Enum):
+    DEPT = "dept"
+    ROLE = "role"
+    USER = "user"
+
+
+class DatabaseAuthType(str, Enum):
+    DB_SCHEMA = "db_schema"
+    DB_SCHEMA_TABLE = "db_schema_table"
+
+
+class AuthType(str, Enum):
+    DEPT = "dept"
+    ROLE = "role"
+    USER = "user"
+    DASHBOARD = "dashboard"
+    CHART = "chart"
+    DATASOURCE = "datasource"
+    DATASET = "dataset"
+    DATABASE_SYNC = "database sync"
+    MENU = "menu"
+    DATABASE = "database"
+
+
+class PrivilegeNameType(str, Enum):
+    VIEW = "view"
+    EXPORT = "export"
+    MANAGE = "manage"
+    GRANT = "grant"
+
+
+class DirectionType(str, Enum):
+    SOURCE = "source"
+    TARGET = "target"
+
+
+class DatasetType:
+    """
+        0：数据库数据集    db
+        1：SQL数据集       sql
+        2：Excel数据集     excel
+        3：关联数据集      UNION
+        4：API数据集       api
+    """
+    DATABASE = 0
+    SQL = 1
+    EXCEL = 2
+    UNION = 3
+    API = 4
+
+
+class DatabaseSyncType:
+    """
+        0：数据库数据集    db
+    """
+    DATABASE = 0
+
+
+
+class DataSourceType(str, Enum):
+    DATABASE = "database"
+    API = "api"
+    TOKEN_API = "token_api"
+class DataBaseType(str, Enum):
+    DATABASE = "hive" or "mysql"
+    API = "api"
+    TOKEN_API = "token_api"
+
+class MenuName(str, Enum):
+    """菜单名称"""
+    DASHBOARD = "Dashboard"
+    CHART = "Chart"
+    SQL_LAB = "SQL Lab"
+    DATASOURCE = "Datasource"
+    DATASET = "Dataset"
+    DATABASE_SYNC = "Database Sync"
+    PERMISSION_MANAGEMENT = "Permission Management"
+    SYSTEM_MANAGER = "System Manager"
+    USER_MANAGEMENT = "User Management"
+    ROLE_MANAGEMENT = "Role Management"
+    DEPT_MANAGEMENT = "Dept Management"
+    SYSTEM_CONFIGURATION = "System Configuration"
+
+
+class SystemLoginType(str, Enum):
+    LOGIN_CAS = "LOGIN_CAS"
+    LOGIN_LDAP = "LOGIN_LDAP"
+
+
+class SystemConfigType(str, Enum):
+    """系统设置类别"""
+    LOGIN = SystemLoginType
+    WATER_MARK = "WATER_MARK"  # 水印配置参数
+    APPEARANCE = "APPEARANCE"  # 登录页配置参数
+    SYSTEM_PARAM = "SYSTEM_PARAM"  # 登录参数设置（失败次数等）
+
+
+class IfExistType(str, Enum):
+    FAIL = "fail"
+    REPLACE = "replace"
+    APPEND = "append"
+
+
+class LoginMethod(str, Enum):
+    DB = "db"
+    LDAP = "ldap"
+    CAS = "cas"
+
+
+class TimeGrainType(str, Enum):
+    YEAR = "year"
+    MONTH = "month"
+    DAY = "day"
+    WEEK = "week"
+    QUARTER = "quarter"
+
+
+class AdaptationEquipment(str, Enum):
+    pc = "pc"
+    mobile = "mobile"

@@ -17,13 +17,14 @@
 import json
 from typing import Callable
 
-from flask import abort, current_app, request
+from flask import abort, g, request
 from flask_appbuilder import expose
 from flask_login import AnonymousUserMixin, login_user
 from flask_wtf.csrf import same_origin
+from flask_login import current_user
 
 from superset import event_logger, is_feature_enabled
-from superset.daos.dashboard import EmbeddedDashboardDAO
+from superset.embedded.dao import EmbeddedDAO
 from superset.superset_typing import FlaskResponse
 from superset.utils import core as utils
 from superset.views.base import BaseSupersetView, common_bootstrap_payload
@@ -50,12 +51,10 @@ class EmbeddedView(BaseSupersetView):
         if not is_feature_enabled("EMBEDDED_SUPERSET"):
             abort(404)
 
-        embedded = EmbeddedDashboardDAO.find_by_id(uuid)
+        embedded = EmbeddedDAO.find_by_id(uuid)
 
         if not embedded:
             abort(404)
-
-        assert embedded is not None
 
         # validate request referrer in allowed domains
         is_referrer_allowed = not embedded.allowed_domains
@@ -70,7 +69,10 @@ class EmbeddedView(BaseSupersetView):
         # Log in as an anonymous user, just for this view.
         # This view needs to be visible to all users,
         # and building the page fails if g.user and/or ctx.user aren't present.
-        login_user(AnonymousUserMixin(), force=True)
+
+        # 没通过验证则重置为访客用户
+        if not current_user.is_authenticated:
+            login_user(AnonymousUserMixin(), force=True)
 
         add_extra_log_payload(
             embedded_dashboard_id=uuid,
@@ -78,10 +80,7 @@ class EmbeddedView(BaseSupersetView):
         )
 
         bootstrap_data = {
-            "config": {
-                "GUEST_TOKEN_HEADER_NAME": current_app.config["GUEST_TOKEN_HEADER_NAME"]
-            },
-            "common": common_bootstrap_payload(),
+            "common": common_bootstrap_payload(g.user),
             "embedded": {
                 "dashboard_id": embedded.dashboard_id,
             },

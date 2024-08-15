@@ -17,22 +17,22 @@
 from typing import Optional
 
 from superset import security_manager
-from superset.commands.chart.exceptions import (
+from superset.charts.commands.exceptions import (
     ChartAccessDeniedError,
     ChartNotFoundError,
 )
-from superset.commands.dataset.exceptions import (
-    DatasetAccessDeniedError,
-    DatasetNotFoundError,
-)
+from superset.charts.dao import ChartDAO
 from superset.commands.exceptions import (
     DatasourceNotFoundValidationError,
     DatasourceTypeInvalidError,
     QueryNotFoundValidationError,
 )
-from superset.daos.chart import ChartDAO
-from superset.daos.dataset import DatasetDAO
-from superset.daos.query import QueryDAO
+from superset.datasets.commands.exceptions import (
+    DatasetAccessDeniedError,
+    DatasetNotFoundError,
+)
+from superset.datasets.dao import DatasetDAO
+from superset.queries.dao import QueryDAO
 from superset.utils.core import DatasourceType
 
 
@@ -81,15 +81,16 @@ def check_access(
     datasource_type: DatasourceType,
 ) -> Optional[bool]:
     check_datasource_access(datasource_id, datasource_type)
-    if not chart_id:
-        return True
-    # Access checks below, no need to validate them twice as they can be expensive.
-    chart = ChartDAO.find_by_id(chart_id, skip_base_filter=True)
-    if chart:
-        can_access_chart = security_manager.is_owner(
-            chart
-        ) or security_manager.can_access("can_read", "Chart")
-        if can_access_chart:
-            return True
-        raise ChartAccessDeniedError()
-    raise ChartNotFoundError()
+    if chart_id:
+        # Access checks below, no need to validate them twice as they can be expensive.
+        chart = ChartDAO.find_by_id(chart_id, skip_base_filter=True)
+        if chart:
+            can_access_chart = security_manager.is_owner(
+                chart
+            ) or security_manager.can_access("can_read", "Chart")
+            if not can_access_chart:
+                raise ChartAccessDeniedError()
+        else:
+            raise ChartNotFoundError()
+
+    return True

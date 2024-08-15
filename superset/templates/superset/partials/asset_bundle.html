@@ -16,21 +16,20 @@
   specific language governing permissions and limitations
   under the License.
 #}
-{% import "superset/macros.html" as macros %}
 {% macro js_bundle(filename) %}
   {# HTML comment is needed for webpack-dev-server to replace assets
      with development version #}
   <!-- Bundle js {{ filename }} START -->
   {% for entry in js_manifest(filename) %}
-    <script src="{{ entry }}" async nonce="{{ macros.get_nonce() }}"></script>
+    <script src="{{ entry if STATIC_ASSETS_PREFIX else assets_prefix  + entry }}" async></script>
   {% endfor %}
-  <!-- Bundle js {{ filename }} END -->
+  <!-- Bundle js {{ filename if STATIC_ASSETS_PREFIX else assets_prefix  + filename }} END -->
 {% endmacro %}
 
 {% macro css_bundle(filename) %}
   <!-- Bundle css {{ filename }} START -->
   {% for entry in css_manifest(filename) %}
-    <link rel="stylesheet" type="text/css" href="{{ entry }}" />
+    <link rel="stylesheet" type="text/css" href="{{ entry if STATIC_ASSETS_PREFIX else assets_prefix + entry }}" />
   {% endfor %}
   <!-- Bundle css {{ filename }} END -->
 {% endmacro %}

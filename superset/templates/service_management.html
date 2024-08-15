@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Service Management Api</title>
+    <style>
+        .container {
+            margin-top: 66px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+        }
+        .button {
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+            border-radius: 10px;
+        }
+        .result {
+            margin-top: 20px;
+            text-align: center;
+            white-space: pre-wrap;
+        }
+        .success {
+            color: green;
+            font-size: 24px;
+        }
+
+        .failed {
+            color: red;
+            font-size: 24px;
+        }
+        .waiting {
+            color: orange;
+            font-size: 24px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+
+       {% if status == 1 %}
+          <div class="success">前端代码更新状态： Success</div>
+        {% elif status == 0 %}
+          <div class="failed">前端代码更新状态： Failed</div>
+        {% elif status == 2 %}
+          <div class="waiting">前端代码更新状态： Waiting</div>
+        {% endif %}
+        <br>
+        <button class="button" onclick="sendPostRequest()">Click me</button>
+        <div class="result" id="resultDiv">{{ message }}</div>
+    </div>
+
+    <script>
+        function sendPostRequest() {
+            var xhr = new XMLHttpRequest();
+            xhr.open("POST", "{{url}}", true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+
+            xhr.onreadystatechange = function () {
+                if (xhr.readyState === 4 && xhr.status === 200) {
+                    var response = JSON.parse(xhr.responseText);
+                    // 在页面上展示数据
+                    var resultDiv = document.getElementById("resultDiv");
+                    resultDiv.textContent = response;
+                }
+            };
+
+            var data = JSON.stringify({ "key": "value" });
+            xhr.send(data);
+        }
+        setInterval(function() {
+          location.reload();
+        }, 5000);
+    </script>
+</body>
+</html>
+

@@ -22,6 +22,7 @@ from superset.views.chart.filters import SliceFilter
 
 
 class SliceMixin:  # pylint: disable=too-few-public-methods
+
     list_title = _("Charts")
     show_title = _("Show Chart")
     add_title = _("Add Chart")

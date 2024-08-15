@@ -14,9 +14,9 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Set
 
-from marshmallow import Schema, validate
+from marshmallow import Schema
 from marshmallow.exceptions import ValidationError
 from sqlalchemy.orm import Session
 
@@ -30,8 +30,9 @@ from superset.commands.importers.v1.utils import (
     METADATA_FILE_NAME,
     validate_metadata_type,
 )
-from superset.daos.base import BaseDAO
-from superset.models.core import Database
+from superset.constants import DataSourceType
+from superset.dao.base import BaseDAO
+from superset.v2.datasources.dao import DataSourceDAO
 
 
 class ImportModelsCommand(BaseCommand):
@@ -40,31 +41,28 @@ class ImportModelsCommand(BaseCommand):
     dao = BaseDAO
     model_name = "model"
     prefix = ""
-    schemas: dict[str, Schema] = {}
+    schemas: Dict[str, Schema] = {}
     import_error = CommandException
 
     # pylint: disable=unused-argument
-    def __init__(self, contents: dict[str, str], *args: Any, **kwargs: Any):
+    def __init__(self, contents: Dict[str, str], *args: Any, **kwargs: Any):
         self.contents = contents
-        self.passwords: dict[str, str] = kwargs.get("passwords") or {}
-        self.ssh_tunnel_passwords: dict[str, str] = (
-            kwargs.get("ssh_tunnel_passwords") or {}
-        )
-        self.ssh_tunnel_private_keys: dict[str, str] = (
-            kwargs.get("ssh_tunnel_private_keys") or {}
-        )
-        self.ssh_tunnel_priv_key_passwords: dict[str, str] = (
-            kwargs.get("ssh_tunnel_priv_key_passwords") or {}
-        )
+        self.passwords: Dict[str, str] = kwargs.get("passwords") or {}
         self.overwrite: bool = kwargs.get("overwrite", False)
-        self._configs: dict[str, Any] = {}
+        self.datasource_group_id = kwargs.get("datasource_group_id", 0)
+        self.dataset_group_id = kwargs.get("dataset_group_id", 0)
+        self.slice_group_id = kwargs.get("slice_group_id", 0)
+        self.dash_group_id = kwargs.get("dash_group_id", 0)
+        self._configs: Dict[str, Any] = {}
 
     @staticmethod
-    def _import(configs: dict[str, Any], overwrite: bool = False) -> None:
+    def _import(
+        session: Session, configs: Dict[str, Any], overwrite: bool = False
+    ) -> None:
         raise NotImplementedError("Subclasses MUST implement _import")
 
     @classmethod
-    def _get_uuids(cls) -> set[str]:
+    def _get_uuids(cls) -> Set[str]:
         return {str(model.uuid) for model in db.session.query(cls.dao.model_cls).all()}
 
     def run(self) -> None:
@@ -72,7 +70,7 @@ class ImportModelsCommand(BaseCommand):
 
         # rollback to prevent partial imports
         try:
-            self._import(self._configs, self.overwrite)
+            self._import(db.session, self._configs, self.overwrite)
             db.session.commit()
         except CommandException as ex:
             db.session.rollback()
@@ -82,11 +80,11 @@ class ImportModelsCommand(BaseCommand):
             raise self.import_error() from ex
 
     def validate(self) -> None:
-        exceptions: list[ValidationError] = []
+        exceptions: List[ValidationError] = []
 
         # verify that the metadata file is present and valid
         try:
-            metadata: Optional[dict[str, str]] = load_metadata(self.contents)
+            metadata: Optional[Dict[str, str]] = load_metadata(self.contents)
         except ValidationError as exc:
             exceptions.append(exc)
             metadata = None
@@ -95,24 +93,17 @@ class ImportModelsCommand(BaseCommand):
 
         # load the configs and make sure we have confirmation to overwrite existing models
         self._configs = load_configs(
-            self.contents,
-            self.schemas,
-            self.passwords,
-            exceptions,
-            self.ssh_tunnel_passwords,
-            self.ssh_tunnel_private_keys,
-            self.ssh_tunnel_priv_key_passwords,
+            self.contents, self.schemas, self.passwords, exceptions
         )
         self._prevent_overwrite_existing_model(exceptions)
 
         if exceptions:
-            raise CommandInvalidError(
-                f"Error importing {self.model_name}",
-                exceptions,
-            )
+            exception = CommandInvalidError(f"Error importing {self.model_name}")
+            exception.add_list(exceptions)
+            raise exception
 
     def _prevent_overwrite_existing_model(  # pylint: disable=invalid-name
-        self, exceptions: list[ValidationError]
+        self, exceptions: List[ValidationError]
     ) -> None:
         """check if the object exists and shouldn't be overwritten"""
         if not self.overwrite:
@@ -122,6 +113,13 @@ class ImportModelsCommand(BaseCommand):
                     file_name.startswith(self.prefix)
                     and config["uuid"] in existing_uuids
                 ):
+                    # 删除后的api数据源，不再提示覆盖
+                    datasource = config.get("datasource", None)
+                    if datasource and datasource.get("d_type", None) == DataSourceType.API.value:
+                        model = DataSourceDAO.find_by_uuid(datasource["uuid"])
+                        if model is None:
+                            return
+
                     exceptions.append(
                         ValidationError(
                             {

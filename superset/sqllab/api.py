@@ -15,30 +15,31 @@
 # specific language governing permissions and limitations
 # under the License.
 import logging
-from typing import Any, cast, Optional
+from typing import Any, cast, Dict, Optional
 from urllib import parse
 
 import simplejson as json
-import sqlparse
-from flask import request, Response
-from flask_appbuilder import permission_name
-from flask_appbuilder.api import expose, protect, rison, safe
+from flask import request
+from flask_appbuilder.api import expose, protect, rison
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from marshmallow import ValidationError
 
 from superset import app, is_feature_enabled
-from superset.commands.sql_lab.estimate import QueryEstimationCommand
-from superset.commands.sql_lab.execute import CommandResult, ExecuteSqlCommand
-from superset.commands.sql_lab.export import SqlResultExportCommand
-from superset.commands.sql_lab.results import SqlExecutionResultsCommand
-from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP
-from superset.daos.database import DatabaseDAO
-from superset.daos.query import QueryDAO
+from superset.connectors.sqla.models import DatasetCategory
+from superset.databases.dao import DatabaseDAO
+from superset import db
+from superset.datasets.dao import DatasetDAO
+from superset.exceptions import HTTPError
 from superset.extensions import event_logger
+from superset.global_messages import Messages
 from superset.jinja_context import get_template_processor
 from superset.models.sql_lab import Query
+from superset.queries.dao import QueryDAO
 from superset.sql_lab import get_sql_results
 from superset.sqllab.command_status import SqlJsonExecutionStatus
+from superset.sqllab.commands.execute import CommandResult, ExecuteSqlCommand
+from superset.sqllab.commands.export import SqlResultExportCommand
+from superset.sqllab.commands.results import SqlExecutionResultsCommand
 from superset.sqllab.exceptions import (
     QueryIsForbiddenToAccessException,
     SqlLabException,
@@ -46,12 +47,11 @@ from superset.sqllab.exceptions import (
 from superset.sqllab.execution_context_convertor import ExecutionContextConvertor
 from superset.sqllab.query_render import SqlQueryRenderImpl
 from superset.sqllab.schemas import (
-    EstimateQueryCostSchema,
     ExecutePayloadSchema,
-    FormatQueryPayloadSchema,
     QueryExecutionResponseSchema,
-    sql_lab_get_results_schema,
-    SQLLabBootstrapSchema,
+    QueryColumnsSchema,
+    QueryColumnsResponseSchema,
+    sql_lab_get_results_schema, CategoryType,
 )
 from superset.sqllab.sql_json_executer import (
     ASynchronousSqlJsonExecutor,
@@ -59,10 +59,10 @@ from superset.sqllab.sql_json_executer import (
     SynchronousSqlJsonExecutor,
 )
 from superset.sqllab.sqllab_execution_context import SqlJsonExecutionContext
-from superset.sqllab.utils import bootstrap_sqllab_data
 from superset.sqllab.validators import CanAccessQueryValidatorImpl
 from superset.superset_typing import FlaskResponse
 from superset.utils import core as utils
+from superset.v2.datasources.dao import DataSourceDAO
 from superset.views.base import CsvResponse, generate_download_headers, json_success
 from superset.views.base_api import BaseSupersetApi, requires_json, statsd_metrics
 
@@ -71,7 +71,6 @@ logger = logging.getLogger(__name__)
 
 
 class SqlLabRestApi(BaseSupersetApi):
-    method_permission_name = MODEL_API_RW_METHOD_PERMISSION_MAP
     datamodel = SQLAInterface(Query)
 
     resource_name = "sqllab"
@@ -79,161 +78,19 @@ class SqlLabRestApi(BaseSupersetApi):
 
     class_permission_name = "SQLLab"
 
-    estimate_model_schema = EstimateQueryCostSchema()
     execute_model_schema = ExecutePayloadSchema()
-    format_model_schema = FormatQueryPayloadSchema()
+    simple_query_schema = QueryColumnsSchema()
 
     apispec_parameter_schemas = {
         "sql_lab_get_results_schema": sql_lab_get_results_schema,
     }
     openapi_spec_tag = "SQL Lab"
     openapi_spec_component_schemas = (
-        EstimateQueryCostSchema,
         ExecutePayloadSchema,
         QueryExecutionResponseSchema,
-        SQLLabBootstrapSchema,
+        QueryColumnsResponseSchema,
+        QueryColumnsSchema,
     )
-
-    @expose("/", methods=("GET",))
-    @protect()
-    @safe
-    @statsd_metrics
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get",
-        log_to_statsd=False,
-    )
-    def get(self) -> Response:
-        """Get the bootstrap data for SqlLab
-        ---
-        get:
-          summary: Get the bootstrap data for SqlLab page
-          description: >-
-            Assembles SQLLab bootstrap data (active_tab, databases, queries,
-            tab_state_ids) in a single endpoint. The data can be assembled
-            from the current user's id.
-          responses:
-            200:
-              description: Returns the initial bootstrap data for SqlLab
-              content:
-                application/json:
-                  schema:
-                    $ref: '#/components/schemas/SQLLabBootstrapSchema'
-            400:
-              $ref: '#/components/responses/400'
-            401:
-              $ref: '#/components/responses/401'
-            403:
-              $ref: '#/components/responses/403'
-            500:
-              $ref: '#/components/responses/500'
-        """
-        user_id = utils.get_user_id()
-        # TODO: Replace with a command class once fully migrated to SPA
-        result = bootstrap_sqllab_data(user_id)
-
-        return json_success(
-            json.dumps(
-                {"result": result},
-                default=utils.json_iso_dttm_ser,
-                ignore_nan=True,
-            ),
-            200,
-        )
-
-    @expose("/estimate/", methods=("POST",))
-    @protect()
-    @statsd_metrics
-    @requires_json
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".estimate_query_cost",
-        log_to_statsd=False,
-    )
-    def estimate_query_cost(self) -> Response:
-        """Estimate the SQL query execution cost.
-        ---
-        post:
-          summary: Estimate the SQL query execution cost
-          requestBody:
-            description: SQL query and params
-            required: true
-            content:
-              application/json:
-                schema:
-                  $ref: '#/components/schemas/EstimateQueryCostSchema'
-          responses:
-            200:
-              description: Query estimation result
-              content:
-                application/json:
-                  schema:
-                    type: object
-                    properties:
-                      result:
-                        type: object
-            400:
-              $ref: '#/components/responses/400'
-            401:
-              $ref: '#/components/responses/401'
-            403:
-              $ref: '#/components/responses/403'
-            500:
-              $ref: '#/components/responses/500'
-        """
-        try:
-            model = self.estimate_model_schema.load(request.json)
-        except ValidationError as error:
-            return self.response_400(message=error.messages)
-
-        command = QueryEstimationCommand(model)
-        result = command.run()
-        return self.response(200, result=result)
-
-    @expose("/format_sql/", methods=("POST",))
-    @statsd_metrics
-    @protect()
-    @permission_name("read")
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}" f".format",
-        log_to_statsd=False,
-    )
-    def format_sql(self) -> FlaskResponse:
-        """Format the SQL query.
-        ---
-        post:
-          summary: Format SQL code
-          requestBody:
-            description: SQL query
-            required: true
-            content:
-              application/json:
-                schema:
-                  $ref: '#/components/schemas/FormatQueryPayloadSchema'
-          responses:
-            200:
-              description: Format SQL result
-              content:
-                application/json:
-                  schema:
-                    type: object
-                    properties:
-                      result:
-                        type: string
-            400:
-              $ref: '#/components/responses/400'
-            401:
-              $ref: '#/components/responses/401'
-            403:
-              $ref: '#/components/responses/403'
-            500:
-              $ref: '#/components/responses/500'
-        """
-        try:
-            model = self.format_model_schema.load(request.json)
-            result = sqlparse.format(model["sql"], reindent=True, keyword_case="upper")
-            return self.response(200, result=result)
-        except ValidationError as error:
-            return self.response_400(message=error.messages)
 
     @expose("/export/<string:client_id>/")
     @protect()
@@ -244,10 +101,11 @@ class SqlLabRestApi(BaseSupersetApi):
         log_to_statsd=False,
     )
     def export_csv(self, client_id: str) -> CsvResponse:
-        """Export the SQL query results to a CSV.
+        """Exports the SQL query results to a CSV
         ---
         get:
-          summary: Export the SQL query results to a CSV
+          summary: >-
+            Exports the SQL query results to a CSV
           parameters:
           - in: path
             schema:
@@ -305,10 +163,11 @@ class SqlLabRestApi(BaseSupersetApi):
         log_to_statsd=False,
     )
     def get_results(self, **kwargs: Any) -> FlaskResponse:
-        """Get the result of a SQL query execution.
+        """Gets the result of a SQL query execution
         ---
         get:
-          summary: Get the result of a SQL query execution
+          summary: >-
+            Gets the result of a SQL query execution
           parameters:
           - in: query
             name: q
@@ -340,17 +199,15 @@ class SqlLabRestApi(BaseSupersetApi):
         key = params.get("key")
         rows = params.get("rows")
         result = SqlExecutionResultsCommand(key=key, rows=rows).run()
-
-        # Using pessimistic json serialization since some database drivers can return
-        # unserializeable types at times
-        payload = json.dumps(
-            result,
-            default=utils.pessimistic_json_iso_dttm_ser,
-            ignore_nan=True,
+        # return the result without special encoding
+        return json_success(
+            json.dumps(
+                result, default=utils.json_iso_dttm_ser, ignore_nan=True, encoding=None
+            ),
+            200,
         )
-        return json_success(payload, 200)
 
-    @expose("/execute/", methods=("POST",))
+    @expose("/execute/", methods=["POST"])
     @protect()
     @statsd_metrics
     @requires_json
@@ -360,10 +217,11 @@ class SqlLabRestApi(BaseSupersetApi):
         log_to_statsd=False,
     )
     def execute_sql_query(self) -> FlaskResponse:
-        """Execute a SQL query.
+        """Executes a SQL query
         ---
         post:
-          summary: Execute a SQL query
+          description: >-
+            Starts the execution of a SQL query
           requestBody:
             description: SQL query and params
             required: true
@@ -396,10 +254,15 @@ class SqlLabRestApi(BaseSupersetApi):
               $ref: '#/components/responses/500'
         """
         try:
-            self.execute_model_schema.load(request.json)
+            item = self.execute_model_schema.load(request.json)
         except ValidationError as error:
             return self.response_400(message=error.messages)
 
+        datasource = DataSourceDAO.find_by_database_id(item["database_id"])
+        if datasource is None:
+            raise HTTPError(Messages.FORBIDDEN, 403)
+
+        datasource.can_access()
         try:
             log_params = {
                 "user_agent": cast(Optional[str], request.headers.get("USER_AGENT"))
@@ -423,9 +286,145 @@ class SqlLabRestApi(BaseSupersetApi):
             )
             return self.response(response_status, **payload)
 
+    @expose("/execute/get_columns_values/", methods=["POST"])
+    @protect()
+    @statsd_metrics
+    @requires_json
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
+        f".get_columns_values",
+        log_to_statsd=False,
+    )
+    def get_columns_values(self) -> FlaskResponse:
+        """Executes a SQL query gets multiple field values
+        ---
+        post:
+          summary: >-
+            Execute the sql query and return the specified fields in the query result
+          requestBody:
+            description: SQL query and params
+            required: true
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/QueryColumnsSchema'
+          responses:
+            200:
+              description: Query execution result
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/QueryColumnsResponseSchema'
+            202:
+              description: Query execution result, query still running
+              content:
+                application/json:
+                  schema:
+                    $ref: '#/components/schemas/QueryColumnsResponseSchema'
+            400:
+              $ref: '#/components/responses/400'
+            401:
+              $ref: '#/components/responses/401'
+            403:
+              $ref: '#/components/responses/403'
+            404:
+              $ref: '#/components/responses/404'
+            500:
+              $ref: '#/components/responses/500'
+        """
+        try:
+            category_id = request.json.get('category_id')
+            if category_id:
+                category_id = request.json.pop('category_id')
+                category = db.session.query(DatasetCategory).filter_by(id=category_id).first()
+                if category:
+                    dataset_id = category.table_id
+                    table_name = category.table_name
+                    database_id = category.database_id
+                    category_type = category.category_type
+                    database_name = category.database_name
+                    columns = [
+                        category.first_cate_field,
+                        category.second_cate_field,
+                        category.field_name,
+                        category.field_code,
+                        category.is_cross_field
+                    ]
+                    temp_dict = {
+                        'table_name': table_name,
+                        'database_id': database_id,
+                        'dataset_id': dataset_id,
+                        'columns': columns,
+                        'category_type': category_type,
+                        'schema': database_name
+                    }
+                    request.json.update({'database_id': database_id})
+                    self.simple_query_schema.load(temp_dict)
+                else:
+                    return self.response_404()
+
+            else:
+                self.simple_query_schema.load(request.json)
+                columns = request.json.pop('columns')
+                table_name = request.json.pop('table_name')
+                dataset_id = request.json.pop('dataset_id')
+                category_type = request.json.pop('category_type')
+
+            query_sql = f"select {', '.join([f'`{c}`' for c in columns])} from `{table_name}`"
+            request.json.update({'sql': query_sql})
+            self.execute_model_schema.load(request.json)
+        except ValidationError as error:
+            return self.response_400(message=error.messages)
+
+        try:
+            log_params = {
+                "user_agent": cast(Optional[str], request.headers.get("USER_AGENT"))
+            }
+            execution_context = SqlJsonExecutionContext(request.json)
+            command = self._create_sql_json_command(execution_context, log_params)
+            command_result: CommandResult = command.run()
+
+            response_status = (
+                202
+                if command_result["status"] == SqlJsonExecutionStatus.QUERY_IS_RUNNING
+                else 200
+            )
+
+            # return the execution result without special encoding
+            pyload_json = json.loads(command_result["payload"]).get('data') or []
+            first_cate, second_cate, field_name, field_code, is_cross \
+                = columns[0], columns[1], columns[2], columns[3], columns[4]
+            dataset_obj = DatasetDAO.find_by_id(dataset_id)
+            if dataset_obj:
+                dataset_columns = [str(column) for column in dataset_obj.columns]
+            else:
+                return self.response_404()
+            tree = []
+            for item in pyload_json:
+                fixed_format = {
+                    'first_cate': item[first_cate],
+                    'second_cate': item[second_cate],
+                    'field_name': item[field_name],
+                    'field_code': item[field_code],
+                    'is_cross': item[is_cross] or '否',
+                }
+                if category_type != CategoryType.SIMPLED:
+                    if item.get(field_code) not in dataset_columns:
+                        continue
+                tree.append(fixed_format)
+
+            return json_success(json.dumps(tree), response_status)
+        except SqlLabException as ex:
+            payload = {"errors": [ex.to_dict()]}
+
+            response_status = (
+                403 if isinstance(ex, QueryIsForbiddenToAccessException) else ex.status
+            )
+            return self.response(response_status, **payload)
+
     @staticmethod
     def _create_sql_json_command(
-        execution_context: SqlJsonExecutionContext, log_params: Optional[dict[str, Any]]
+        execution_context: SqlJsonExecutionContext, log_params: Optional[Dict[str, Any]]
     ) -> ExecuteSqlCommand:
         query_dao = QueryDAO()
         sql_json_executor = SqlLabRestApi._create_sql_json_executor(
@@ -433,7 +432,7 @@ class SqlLabRestApi(BaseSupersetApi):
         )
         execution_context_convertor = ExecutionContextConvertor()
         execution_context_convertor.set_max_row_in_display(
-            int(config.get("DISPLAY_MAX_ROW"))
+            int(config.get("DISPLAY_MAX_ROW"))  # type: ignore
         )
         return ExecuteSqlCommand(
             execution_context,
@@ -458,7 +457,7 @@ class SqlLabRestApi(BaseSupersetApi):
             sql_json_executor = SynchronousSqlJsonExecutor(
                 query_dao,
                 get_sql_results,
-                config.get("SQLLAB_TIMEOUT"),
+                config.get("SQLLAB_TIMEOUT"),  # type: ignore
                 is_feature_enabled("SQLLAB_BACKEND_PERSISTENCE"),
             )
         return sql_json_executor

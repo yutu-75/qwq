@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 import uuid
+from typing import List
 
 from flask_appbuilder import Model
 from sqlalchemy import Column, ForeignKey, Integer, Text
@@ -39,20 +40,17 @@ class EmbeddedDashboard(Model, AuditMixinNullable):
     __tablename__ = "embedded_dashboards"
 
     uuid = Column(UUIDType(binary=True), default=uuid.uuid4, primary_key=True)
-    allow_domain_list = Column(Text)  # reference the `allowed_domains` property instead
-    dashboard_id = Column(
-        Integer,
-        ForeignKey("dashboards.id", ondelete="CASCADE"),
-        nullable=False,
-    )
+    allow_domain_list = Column(Text, comment='允许嵌入的域列表')  # reference the `allowed_domains` property instead
+    dashboard_id = Column(Integer, ForeignKey("dashboards.id"), nullable=False)
     dashboard = relationship(
         "Dashboard",
         back_populates="embedded",
+        cascade="all, delete",
         foreign_keys=[dashboard_id],
     )
 
     @property
-    def allowed_domains(self) -> list[str]:
+    def allowed_domains(self) -> List[str]:
         """
         A list of domains which are allowed to embed the dashboard.
         An empty list means any domain can embed.

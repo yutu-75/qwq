@@ -14,6 +14,14 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+"""
+修改：陈果-2023-03-10
+修改内容：修复使用过程中token过期问题
+修改：李洪浩-2023-03-10
+修改内容：解决Linux中导包问题
+修改：陈果-2023-03-10
+修改内容：修复flask_caching版本不一致问题
+"""
 import logging
 from typing import Any, Optional, Union
 
@@ -107,6 +115,13 @@ class CacheManager:
     @property
     def cache(self) -> Cache:
         return self._cache
+
+    @property
+    def cache_read_client(self):
+        if hasattr(self._cache.cache, "_read_client"):
+            return self._cache.cache._read_client
+
+        return self._cache.cache._read_clients
 
     @property
     def thumbnail_cache(self) -> Cache:

@@ -1,0 +1,20 @@
+<!--
+ * @Description: File Content
+ * @Date: 2023-07-28 17:22:20
+ * @Author: tanfengqiao
+ * @LastEditTime: 2023-07-28 17:23:18
+ * @LastEditors: tanfengqiao
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20">
+  <defs>
+    <style>
+      .c {
+        fill: #b2b2b2;
+      }
+    </style>
+  </defs>
+  <path fill="none" d="M0,0H20V20H0Z" />
+  <path fill="currentColor" d="M12,13.914l4.793,4.793,1.414-1.414L12,11.086,5.793,17.293l1.414,1.414ZM6,7H18V9H6Z"
+    transform="translate(-1.998 -2.851)" />
+  <path class="c" d="M6,7H18V9H6Z" transform="translate(-1.998 -2.851)" />
+</svg>

@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 from typing import Any
+from flask import g
 
 from flask_sqlalchemy import BaseQuery
 
@@ -32,6 +33,7 @@ class QueryFilter(BaseFilter):  # pylint: disable=too-few-public-methods
 
         :returns: query
         """
-        if not security_manager.can_access_all_queries():
+        # if not security_manager.can_access_all_queries():
+        if not g.user.is_admin:
             query = query.filter(Query.user_id == get_user_id())
         return query

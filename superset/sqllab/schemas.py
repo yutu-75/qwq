@@ -14,9 +14,10 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from marshmallow import fields, Schema
+import enum
 
-from superset.databases.schemas import ImportV1DatabaseSchema
+from marshmallow import fields, Schema, validate
+from marshmallow.validate import Length
 
 sql_lab_get_results_schema = {
     "type": "object",
@@ -25,25 +26,6 @@ sql_lab_get_results_schema = {
     },
     "required": ["key"],
 }
-
-
-class EstimateQueryCostSchema(Schema):
-    database_id = fields.Integer(
-        required=True, metadata={"description": "The database id"}
-    )
-    sql = fields.String(
-        required=True, metadata={"description": "The SQL query to estimate"}
-    )
-    template_params = fields.Dict(
-        keys=fields.String(), metadata={"description": "The SQL query template params"}
-    )
-    schema = fields.String(
-        allow_none=True, metadata={"description": "The database schema"}
-    )
-
-
-class FormatQueryPayloadSchema(Schema):
-    sql = fields.String(required=True)
 
 
 class ExecutePayloadSchema(Schema):
@@ -64,9 +46,10 @@ class ExecutePayloadSchema(Schema):
 
 
 class QueryResultSchema(Schema):
-    changed_on = fields.DateTime()
+    changedOn = fields.DateTime()
+    changed_on = fields.String()
     dbId = fields.Integer()
-    db = fields.String()  # pylint: disable=disallowed-name
+    db = fields.String()  # pylint: disable=invalid-name
     endDttm = fields.Float()
     errorMessage = fields.String(allow_none=True)
     executedSql = fields.String()
@@ -103,48 +86,31 @@ class QueryExecutionResponseSchema(Schema):
     query_id = fields.Integer()
 
 
-class TableSchema(Schema):
-    database_id = fields.Integer()
-    description = fields.String()
-    expanded = fields.Boolean()
-    id = fields.Integer()
-    schema = fields.String()
-    tab_state_id = fields.Integer()
-    table = fields.String()
+class CategoryType(str, enum.Enum):
+    SIMPLED = 'simpled'
+    RELATED = 'related'
 
 
-class TabStateSchema(Schema):
-    active = fields.Boolean()
-    autorun = fields.Boolean()
-    database_id = fields.Integer()
-    extra_json = fields.Dict()
-    hide_left_bar = fields.Boolean()
-    id = fields.String()
-    label = fields.String()
-    latest_query = fields.Nested(QueryResultSchema)
-    query_limit = fields.Integer()
-    saved_query = fields.Dict(
-        allow_none=True,
-        metadata={"id": "SavedQuery id"},
-    )
-    schema = fields.String()
-    sql = fields.String()
-    table_schemas = fields.List(fields.Nested(TableSchema))
-    user_id = fields.Integer()
+class QueryColumnsSchema(Schema):
+    columns = fields.List(fields.String, required=True, validate=Length(equal=5))
+    table_name = fields.String(required=True)
+    database_id = fields.Integer(required=True)
+    dataset_id = fields.Integer(required=True)
+    schema = fields.String(required=True, deprecation='A real database name')
+    sql = fields.String(default="select 1",
+                        deprecation='Custom default values ensure compatibility')
+    category_type = fields.String(
+        validate=validate.OneOf(choices=[ds.value for ds in CategoryType]),
+        required=True)
 
 
-class SQLLabBootstrapSchema(Schema):
-    active_tab = fields.Nested(TabStateSchema)
-    databases = fields.Dict(
-        keys=fields.String(
-            metadata={"description": "Database id"},
-        ),
-        values=fields.Nested(ImportV1DatabaseSchema),
-    )
-    queries = fields.Dict(
-        keys=fields.String(
-            metadata={"description": "Query id"},
-        ),
-        values=fields.Nested(QueryResultSchema),
-    )
-    tab_state_ids = fields.List(fields.String())
+class QueryColumnsSimpleSchema(Schema):
+    first_cate = fields.String()
+    second_cate = fields.String()
+    field_name = fields.String()
+    field_code = fields.String()
+    is_cross = fields.String()
+
+
+class QueryColumnsResponseSchema(Schema):
+    result = fields.List(fields.Nested(QueryColumnsSimpleSchema))

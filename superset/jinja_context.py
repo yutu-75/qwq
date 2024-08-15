@@ -15,28 +15,44 @@
 # specific language governing permissions and limitations
 # under the License.
 """Defines the templating context for SQL Lab"""
+
+"""
+修改人：李洪浩
+修改内容：增加组织信息动态变量
+
+"""
 import json
 import re
-from datetime import datetime
 from functools import lru_cache, partial
-from typing import Any, Callable, cast, Optional, TYPE_CHECKING, TypedDict, Union
+from typing import (
+    Any,
+    Callable,
+    cast,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
+    Union,
+)
 
-import dateutil
 from flask import current_app, g, has_request_context, request
 from flask_babel import gettext as _
-from jinja2 import DebugUndefined, Environment
+from jinja2 import DebugUndefined
 from jinja2.sandbox import SandboxedEnvironment
 from sqlalchemy.engine.interfaces import Dialect
-from sqlalchemy.sql.expression import bindparam
 from sqlalchemy.types import String
+from typing_extensions import TypedDict
 
-from superset.commands.dataset.exceptions import DatasetNotFoundError
 from superset.constants import LRU_CACHE_MAX_SIZE
+from superset.datasets.commands.exceptions import DatasetNotFoundError
 from superset.exceptions import SupersetTemplateException
 from superset.extensions import feature_flag_manager
+# from superset.utils.memoized import memoized
+from superset.get_user_info import user_info_get
 from superset.utils.core import (
     convert_legacy_filters_into_adhoc,
-    get_user,
+    get_user_id,
     merge_extra_filters,
 )
 
@@ -63,14 +79,14 @@ COLLECTION_TYPES = ("list", "dict", "tuple", "set")
 
 
 @lru_cache(maxsize=LRU_CACHE_MAX_SIZE)
-def context_addons() -> dict[str, Any]:
+def context_addons() -> Dict[str, Any]:
     return current_app.config.get("JINJA_CONTEXT_ADDONS", {})
 
 
 class Filter(TypedDict):
     op: str  # pylint: disable=C0103
     col: str
-    val: Union[None, Any, list[Any]]
+    val: Union[None, Any, List[Any]]
 
 
 class ExtraCache:
@@ -85,6 +101,13 @@ class ExtraCache:
         r"\{\{.*("
         r"current_user_id\(.*\)|"
         r"current_username\(.*\)|"
+        r"current_user_is_admin\(.*\)|"
+        r"current_user_type\(.*\)|"
+        r"current_user_organization_code\(.*\)|"
+        r"current_user_invest_code\(.*\)|"
+        r"current_user_parent_dept_code\(.*\)|"
+        r"current_user_dept_code\(.*\)|"
+        r"current_user_dept_level\(.*\)|"
         r"cache_key_wrapper\(.*\)|"
         r"url_param\(.*\)"
         r").*\}\}"
@@ -92,9 +115,9 @@ class ExtraCache:
 
     def __init__(
         self,
-        extra_cache_keys: Optional[list[Any]] = None,
-        applied_filters: Optional[list[str]] = None,
-        removed_filters: Optional[list[str]] = None,
+        extra_cache_keys: Optional[List[Any]] = None,
+        applied_filters: Optional[List[str]] = None,
+        removed_filters: Optional[List[str]] = None,
         dialect: Optional[Dialect] = None,
     ):
         self.extra_cache_keys = extra_cache_keys
@@ -110,10 +133,11 @@ class ExtraCache:
         :returns: The user ID
         """
 
-        if user := get_user():
+        if hasattr(g, "user") and g.user:
+            id_ = get_user_id()
             if add_to_cache_keys:
-                self.cache_key_wrapper(user.id)
-            return user.id
+                self.cache_key_wrapper(id_)
+            return id_
         return None
 
     def current_username(self, add_to_cache_keys: bool = True) -> Optional[str]:
@@ -128,6 +152,145 @@ class ExtraCache:
             if add_to_cache_keys:
                 self.cache_key_wrapper(g.user.username)
             return g.user.username
+        return None
+
+    def current_user_is_admin(self, add_to_cache_keys: bool = True) -> Optional[bool]:
+        """
+        Return the roles of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The user is admin or not
+        """
+
+        if g.user and hasattr(g.user, "roles"):
+            user_roles = [role.name.lower() for role in list(g.user.roles)]
+            _is_admin = "admin" in user_roles
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_is_admin)
+            return _is_admin
+        return None
+
+    def current_user_type(self, add_to_cache_keys: bool = True) -> Optional[str]:
+        """
+        Return is the type of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The user type
+        """
+
+        _user_info = None
+
+        if g.user and hasattr(g.user, "username"):
+            _database_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            _user_info = user_info_get(g.user.username, _database_uri)
+
+        if _user_info:
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_user_info["user_type"])
+            return _user_info["user_type"]
+        return None
+
+    def current_user_organization_code(self, add_to_cache_keys: bool = True) -> Optional[str]:
+        """
+        Return the organization code of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The organization code
+        """
+
+        _user_info = None
+        # if self._user_info and hasattr(self._user_info, "company_id"):
+        if g.user and hasattr(g.user, "username"):
+            # _database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", {})
+            _database_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            _user_info = user_info_get(g.user.username, _database_uri)
+
+        if _user_info:
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_user_info["organization_code"])
+            return _user_info["organization_code"]
+        return None
+
+    def current_user_invest_code(self, add_to_cache_keys: bool = True) -> Optional[str]:
+        """
+        Return the invest_code of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The invest_code
+        """
+
+        _user_info = None
+        # if self._user_info and hasattr(self._user_info, "company_id"):
+        if g.user and hasattr(g.user, "username"):
+            # _database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", {})
+            _database_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            _user_info = user_info_get(g.user.username, _database_uri)
+
+        if _user_info:
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_user_info["invest_code"])
+            return _user_info["invest_code"]
+        return None
+
+    def current_user_parent_dept_code(self, add_to_cache_keys: bool = True) -> Optional[str]:
+        """
+        Return the parent department code of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The parent department code
+        """
+
+        _user_info = None
+
+        if g.user and hasattr(g.user, "username"):
+            _database_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            _user_info = user_info_get(g.user.username, _database_uri)
+
+        # if _user_info and hasattr(_user_info, "parent_dept_id"):
+        if _user_info:
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_user_info["parent_dept_code"])
+            return _user_info["parent_dept_code"]
+        return None
+
+    def current_user_dept_code(self, add_to_cache_keys: bool = True) -> Optional[str]:
+        """
+        Return the department code of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The department code
+        """
+
+        _user_info = None
+        if g.user and hasattr(g.user, "username"):
+            # _database_uri = current_app.config.get("SQLALCHEMY_DATABASE_URI", {})
+            _database_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            _user_info = user_info_get(g.user.username, _database_uri)
+
+        if _user_info:
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_user_info["dept_code"])
+            return _user_info["dept_code"]
+        return None
+
+    def current_user_dept_level(self, add_to_cache_keys: bool = True) -> Optional[str]:
+        """
+        Return the department level of the user who is currently logged in.
+
+        :param add_to_cache_keys: Whether the value should be included in the cache key
+        :returns: The department level
+        """
+
+        _user_info = None
+
+        if g.user and hasattr(g.user, "username"):
+            _database_uri = current_app.config["SQLALCHEMY_DATABASE_URI"]
+            _user_info = user_info_get(g.user.username, _database_uri)
+
+        if _user_info:
+            if add_to_cache_keys:
+                self.cache_key_wrapper(_user_info["dept_level"])
+            return _user_info["dept_level"]
         return None
 
     def cache_key_wrapper(self, key: Any) -> Any:
@@ -159,7 +322,7 @@ class ExtraCache:
 
         When in SQL Lab, it's possible to add arbitrary URL "query string" parameters,
         and use those in your SQL code. For instance you can alter your url and add
-        `?foo=bar`, as in `{domain}/sqllab?foo=bar`. Then if your query is
+        `?foo=bar`, as in `{domain}/superset/sqllab?foo=bar`. Then if your query is
         something like SELECT * FROM foo = '{{ url_param('foo') }}', it will be parsed
         at runtime and replaced by the value in the URL.
 
@@ -180,7 +343,7 @@ class ExtraCache:
         # pylint: disable=import-outside-toplevel
         from superset.views.utils import get_form_data
 
-        if has_request_context() and request.args.get(param):
+        if has_request_context() and request.args.get(param):  # type: ignore
             return request.args.get(param, default)
 
         form_data, _ = get_form_data()
@@ -197,7 +360,7 @@ class ExtraCache:
 
     def filter_values(
         self, column: str, default: Optional[str] = None, remove_filter: bool = False
-    ) -> list[Any]:
+    ) -> List[Any]:
         """Gets a values for a particular filter as a list
 
         This is useful if:
@@ -221,7 +384,7 @@ class ExtraCache:
             only apply to the inner query
         :return: returns a list of filter values
         """
-        return_val: list[Any] = []
+        return_val: List[Any] = []
         filters = self.get_filters(column, remove_filter)
         for flt in filters:
             val = flt.get("val")
@@ -236,7 +399,7 @@ class ExtraCache:
 
         return return_val
 
-    def get_filters(self, column: str, remove_filter: bool = False) -> list[Filter]:
+    def get_filters(self, column: str, remove_filter: bool = False) -> List[Filter]:
         """Get the filters applied to the given column. In addition
            to returning values like the filter_values function
            the get_filters function returns the operator specified in the explorer UI.
@@ -307,10 +470,10 @@ class ExtraCache:
         convert_legacy_filters_into_adhoc(form_data)
         merge_extra_filters(form_data)
 
-        filters: list[Filter] = []
+        filters: List[Filter] = []
 
         for flt in form_data.get("adhoc_filters", []):
-            val: Union[Any, list[Any]] = flt.get("comparator")
+            val: Union[Any, List[Any]] = flt.get("comparator")
             op: str = flt["operator"].upper() if flt.get("operator") else None
             # fltOpName: str = flt.get("filterOptionName")
             if (
@@ -361,7 +524,7 @@ def safe_proxy(func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     return return_value
 
 
-def validate_context_types(context: dict[str, Any]) -> dict[str, Any]:
+def validate_context_types(context: Dict[str, Any]) -> Dict[str, Any]:
     for key in context:
         arg_type = type(context[key]).__name__
         if arg_type not in ALLOWED_TYPES and key not in context_addons():
@@ -386,8 +549,8 @@ def validate_context_types(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def validate_template_context(
-    engine: Optional[str], context: dict[str, Any]
-) -> dict[str, Any]:
+    engine: Optional[str], context: Dict[str, Any]
+) -> Dict[str, Any]:
     if engine and engine in context:
         # validate engine context separately to allow for engine-specific methods
         engine_context = validate_context_types(context.pop(engine))
@@ -398,39 +561,23 @@ def validate_template_context(
     return validate_context_types(context)
 
 
-class WhereInMacro:  # pylint: disable=too-few-public-methods
-    def __init__(self, dialect: Dialect):
-        self.dialect = dialect
+def where_in(values: List[Any], mark: str = "'") -> str:
+    """
+    Given a list of values, build a parenthesis list suitable for an IN expression.
 
-    def __call__(self, values: list[Any], mark: Optional[str] = None) -> str:
-        """
-        Given a list of values, build a parenthesis list suitable for an IN expression.
+        >>> where_in([1, "b", 3])
+        (1, 'b', 3)
 
-            >>> from sqlalchemy.dialects import mysql
-            >>> where_in = WhereInMacro(dialect=mysql.dialect())
-            >>> where_in([1, "Joe's", 3])
-            (1, 'Joe''s', 3)
+    """
 
-        """
-        binds = [bindparam(f"value_{i}", value) for i, value in enumerate(values)]
-        string_representations = [
-            str(
-                bind.compile(
-                    dialect=self.dialect, compile_kwargs={"literal_binds": True}
-                )
-            )
-            for bind in binds
-        ]
-        joined_values = ", ".join(string_representations)
-        result = f"({joined_values})"
+    def quote(value: Any) -> str:
+        if isinstance(value, str):
+            value = value.replace(mark, mark * 2)
+            return f"{mark}{value}{mark}"
+        return str(value)
 
-        if mark:
-            result += (
-                "\n-- WARNING: the `mark` parameter was removed from the `where_in` "
-                "macro for security reasons\n"
-            )
-
-        return result
+    joined_values = ", ".join(quote(value) for value in values)
+    return f"({joined_values})"
 
 
 class BaseTemplateProcessor:
@@ -446,9 +593,9 @@ class BaseTemplateProcessor:
         database: "Database",
         query: Optional["Query"] = None,
         table: Optional["SqlaTable"] = None,
-        extra_cache_keys: Optional[list[Any]] = None,
-        removed_filters: Optional[list[str]] = None,
-        applied_filters: Optional[list[str]] = None,
+        extra_cache_keys: Optional[List[Any]] = None,
+        removed_filters: Optional[List[str]] = None,
+        applied_filters: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> None:
         self._database = database
@@ -461,12 +608,12 @@ class BaseTemplateProcessor:
         self._extra_cache_keys = extra_cache_keys
         self._applied_filters = applied_filters
         self._removed_filters = removed_filters
-        self._context: dict[str, Any] = {}
-        self.env: Environment = SandboxedEnvironment(undefined=DebugUndefined)
+        self._context: Dict[str, Any] = {}
+        self._env = SandboxedEnvironment(undefined=DebugUndefined)
         self.set_context(**kwargs)
 
         # custom filters
-        self.env.filters["where_in"] = WhereInMacro(database.get_dialect())
+        self._env.filters["where_in"] = where_in
 
     def set_context(self, **kwargs: Any) -> None:
         self._context.update(kwargs)
@@ -479,7 +626,7 @@ class BaseTemplateProcessor:
         >>> process_template(sql)
         "SELECT '2017-01-01T00:00:00'"
         """
-        template = self.env.from_string(sql)
+        template = self._env.from_string(sql)
         kwargs.update(self._context)
 
         context = validate_template_context(self.engine, kwargs)
@@ -487,19 +634,6 @@ class BaseTemplateProcessor:
 
 
 class JinjaTemplateProcessor(BaseTemplateProcessor):
-    def _parse_datetime(self, dttm: str) -> Optional[datetime]:
-        """
-        Try to parse a datetime and default to None in the worst case.
-
-        Since this may have been rendered by different engines, the datetime may
-        vary slightly in format. We try to make it consistent, and if all else
-        fails, just return None.
-        """
-        try:
-            return dateutil.parser.parse(dttm)
-        except dateutil.parser.ParserError:
-            return None
-
     def set_context(self, **kwargs: Any) -> None:
         super().set_context(**kwargs)
         extra_cache = ExtraCache(
@@ -508,32 +642,22 @@ class JinjaTemplateProcessor(BaseTemplateProcessor):
             removed_filters=self._removed_filters,
             dialect=self._database.get_dialect(),
         )
-
-        from_dttm = (
-            self._parse_datetime(dttm)
-            if (dttm := self._context.get("from_dttm"))
-            else None
-        )
-        to_dttm = (
-            self._parse_datetime(dttm)
-            if (dttm := self._context.get("to_dttm"))
-            else None
-        )
-
-        dataset_macro_with_context = partial(
-            dataset_macro,
-            from_dttm=from_dttm,
-            to_dttm=to_dttm,
-        )
         self._context.update(
             {
                 "url_param": partial(safe_proxy, extra_cache.url_param),
                 "current_user_id": partial(safe_proxy, extra_cache.current_user_id),
                 "current_username": partial(safe_proxy, extra_cache.current_username),
+                "current_user_is_admin": partial(safe_proxy, extra_cache.current_user_is_admin),
+                "current_user_type": partial(safe_proxy, extra_cache.current_user_type),
+                "current_user_organization_code": partial(safe_proxy, extra_cache.current_user_organization_code),
+                "current_user_invest_code": partial(safe_proxy, extra_cache.current_user_invest_code),
+                "current_user_parent_dept_code": partial(safe_proxy, extra_cache.current_user_parent_dept_code),
+                "current_user_dept_code": partial(safe_proxy, extra_cache.current_user_dept_code),
+                "current_user_dept_level": partial(safe_proxy, extra_cache.current_user_dept_level),
                 "cache_key_wrapper": partial(safe_proxy, extra_cache.cache_key_wrapper),
                 "filter_values": partial(safe_proxy, extra_cache.filter_values),
                 "get_filters": partial(safe_proxy, extra_cache.get_filters),
-                "dataset": partial(safe_proxy, dataset_macro_with_context),
+                "dataset": partial(safe_proxy, dataset_macro),
             }
         )
 
@@ -567,7 +691,7 @@ class PrestoTemplateProcessor(JinjaTemplateProcessor):
     @staticmethod
     def _schema_table(
         table_name: str, schema: Optional[str]
-    ) -> tuple[str, Optional[str]]:
+    ) -> Tuple[str, Optional[str]]:
         if "." in table_name:
             schema, table_name = table_name.split(".")
         return table_name, schema
@@ -584,7 +708,7 @@ class PrestoTemplateProcessor(JinjaTemplateProcessor):
         latest_partitions = self.latest_partitions(table_name)
         return latest_partitions[0] if latest_partitions else None
 
-    def latest_partitions(self, table_name: str) -> Optional[list[str]]:
+    def latest_partitions(self, table_name: str) -> Optional[List[str]]:
         """
         Gets the array of all latest partitions
 
@@ -623,7 +747,7 @@ class TrinoTemplateProcessor(PrestoTemplateProcessor):
     engine = "trino"
 
     def process_template(self, sql: str, **kwargs: Any) -> str:
-        template = self.env.from_string(sql)
+        template = self._env.from_string(sql)
         kwargs.update(self._context)
 
         # Backwards compatibility if migrating from Presto.
@@ -640,11 +764,11 @@ DEFAULT_PROCESSORS = {
 
 
 @lru_cache(maxsize=LRU_CACHE_MAX_SIZE)
-def get_template_processors() -> dict[str, Any]:
+def get_template_processors() -> Dict[str, Any]:
     processors = current_app.config.get("CUSTOM_TEMPLATE_PROCESSORS", {})
     for engine, processor in DEFAULT_PROCESSORS.items():
         # do not overwrite engine-specific CUSTOM_TEMPLATE_PROCESSORS
-        if engine not in processors:
+        if not engine in processors:
             processors[engine] = processor
 
     return processors
@@ -668,22 +792,16 @@ def get_template_processor(
 def dataset_macro(
     dataset_id: int,
     include_metrics: bool = False,
-    columns: Optional[list[str]] = None,
-    from_dttm: Optional[datetime] = None,
-    to_dttm: Optional[datetime] = None,
+    columns: Optional[List[str]] = None,
 ) -> str:
     """
     Given a dataset ID, return the SQL that represents it.
 
     The generated SQL includes all columns (including computed) by default. Optionally
     the user can also request metrics to be included, and columns to group by.
-
-    The from_dttm and to_dttm parameters are filled in from filter values in explore
-    views, and we take them to make those properties available to jinja templates in
-    the underlying dataset.
     """
     # pylint: disable=import-outside-toplevel
-    from superset.daos.dataset import DatasetDAO
+    from superset.datasets.dao import DatasetDAO
 
     dataset = DatasetDAO.find_by_id(dataset_id)
     if not dataset:
@@ -696,9 +814,7 @@ def dataset_macro(
         "filter": [],
         "metrics": metrics if include_metrics else None,
         "columns": columns,
-        "from_dttm": from_dttm,
-        "to_dttm": to_dttm,
     }
-    sqla_query = dataset.get_query_str_extended(query_obj, mutate=False)
+    sqla_query = dataset.get_query_str_extended(query_obj)
     sql = sqla_query.sql
-    return f"(\n{sql}\n) AS dataset_{dataset_id}"
+    return f"({sql}) AS dataset_{dataset_id}"

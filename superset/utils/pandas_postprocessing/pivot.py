@@ -14,7 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from flask_babel import gettext as _
 from pandas import DataFrame
@@ -28,17 +28,18 @@ from superset.utils.pandas_postprocessing.utils import (
 
 
 @validate_column_args("index", "columns")
-def pivot(  # pylint: disable=too-many-arguments
+def pivot(  # pylint: disable=too-many-arguments,too-many-locals
     df: DataFrame,
-    index: list[str],
-    aggregates: dict[str, dict[str, Any]],
-    columns: Optional[list[str]] = None,
+    index: List[str],
+    aggregates: Dict[str, Dict[str, Any]],
+    columns: Optional[List[str]] = None,
     metric_fill_value: Optional[Any] = None,
     column_fill_value: Optional[str] = NULL_STRING,
     drop_missing_columns: Optional[bool] = True,
     combine_value_with_metric: bool = False,
     marginal_distributions: Optional[bool] = None,
     marginal_distribution_name: Optional[str] = None,
+    is_sort: Optional[bool] = True,
 ) -> DataFrame:
     """
     Perform a pivot operation on a DataFrame.
@@ -58,6 +59,7 @@ def pivot(  # pylint: disable=too-many-arguments
     :param marginal_distributions: Add totals for row/column. Default to False
     :param marginal_distribution_name: Name of row/column with marginal distribution.
            Default to 'All'.
+    :param is_sort: Specifies if the result should be sorted
     :return: A pivot table
     :raises InvalidPostProcessingError: If the request in incorrect
     """
@@ -87,7 +89,7 @@ def pivot(  # pylint: disable=too-many-arguments
     if not drop_missing_columns and columns:
         for row in df[columns].itertuples():
             for metric in aggfunc.keys():
-                series_set.add(tuple([metric]) + tuple(row[1:]))
+                series_set.add(str(tuple([metric]) + tuple(row[1:])))
 
     df = df.pivot_table(
         values=aggfunc.keys(),
@@ -98,10 +100,14 @@ def pivot(  # pylint: disable=too-many-arguments
         dropna=drop_missing_columns,
         margins=marginal_distributions,
         margins_name=marginal_distribution_name,
+        sort=is_sort
     )
 
     if not drop_missing_columns and len(series_set) > 0 and not df.empty:
-        df = df.drop(df.columns.difference(series_set), axis=PandasAxis.COLUMN)
+        for col in df.columns:
+            series = str(col)
+            if series not in series_set:
+                df = df.drop(col, axis=PandasAxis.COLUMN)
 
     if combine_value_with_metric:
         df = df.stack(0).unstack()

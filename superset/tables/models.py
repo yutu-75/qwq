@@ -24,8 +24,7 @@ addition to a table, new models for columns, metrics, and datasets were also int
 These models are not fully implemented, and shouldn't be used yet.
 """
 
-from collections.abc import Iterable
-from typing import Any, Optional, TYPE_CHECKING
+from typing import Any, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 import sqlalchemy as sa
 from flask_appbuilder import Model
@@ -43,7 +42,6 @@ from superset.models.helpers import (
     ImportExportMixin,
 )
 from superset.sql_parse import Table as TableName
-from superset.superset_typing import ResultSetColumnType
 
 if TYPE_CHECKING:
     from superset.datasets.models import Dataset
@@ -53,18 +51,18 @@ table_column_association_table = sa.Table(
     Model.metadata,  # pylint: disable=no-member
     sa.Column(
         "table_id",
-        sa.ForeignKey("sl_tables.id", ondelete="CASCADE"),
+        sa.ForeignKey("sl_tables.id", ondelete="cascade"),
         primary_key=True,
     ),
     sa.Column(
         "column_id",
-        sa.ForeignKey("sl_columns.id", ondelete="CASCADE"),
+        sa.ForeignKey("sl_columns.id", ondelete="cascade"),
         primary_key=True,
     ),
 )
 
 
-class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
+class Table(Model, AuditMixinNullable, ExtraJSONMixin, ImportExportMixin):
     """
     A table/view in a database.
     """
@@ -75,7 +73,7 @@ class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
     # not exist in the migrations. The reason it does not physically exist is MySQL,
     # PostgreSQL, etc. have a different interpretation of uniqueness when it comes to NULL
     # which is problematic given the catalog and schema are optional.
-    __table_args__ = (UniqueConstraint("database_id", "catalog", "schema", "name"),)
+    # __table_args__ = (UniqueConstraint("database_id", "catalog", "schema", "name"),)
 
     id = sa.Column(sa.Integer, primary_key=True)
     database_id = sa.Column(sa.Integer, sa.ForeignKey("dbs.id"), nullable=False)
@@ -89,7 +87,7 @@ class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
     # The relationship between datasets and columns is 1:n, but we use a
     # many-to-many association table to avoid adding two mutually exclusive
     # columns(dataset_id and table_id) to Column
-    columns: list[Column] = relationship(
+    columns: List[Column] = relationship(
         "Column",
         secondary=table_column_association_table,
         cascade="all, delete-orphan",
@@ -98,7 +96,7 @@ class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
         # is loaded.
         backref="tables",
     )
-    datasets: list["Dataset"]  # will be populated by Dataset.tables backref
+    datasets: List["Dataset"]  # will be populated by Dataset.tables backref
 
     # We use ``sa.Text`` for these attributes because (1) in modern databases the
     # performance is the same as ``VARCHAR``[1] and (2) because some table names can be
@@ -132,8 +130,8 @@ class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
         existing_columns = {column.name: column for column in self.columns}
         quote_identifier = self.database.quote_identifier
 
-        def update_or_create_column(column_meta: ResultSetColumnType) -> Column:
-            column_name: str = column_meta["column_name"]
+        def update_or_create_column(column_meta: Dict[str, Any]) -> Column:
+            column_name: str = column_meta["name"]
             if column_name in existing_columns:
                 column = existing_columns[column_name]
             else:
@@ -155,8 +153,8 @@ class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
         table_names: Iterable[TableName],
         default_schema: Optional[str] = None,
         sync_columns: Optional[bool] = False,
-        default_props: Optional[dict[str, Any]] = None,
-    ) -> list["Table"]:
+        default_props: Optional[Dict[str, Any]] = None,
+    ) -> List["Table"]:
         """
         Load or create multiple Table instances.
         """
@@ -164,12 +162,10 @@ class Table(AuditMixinNullable, ExtraJSONMixin, ImportExportMixin, Model):
             return []
 
         if not database.id:
-            raise Exception(  # pylint: disable=broad-exception-raised
-                "Database must be already saved to metastore"
-            )
+            raise Exception("Database must be already saved to metastore")
 
         default_props = default_props or {}
-        session: Session = inspect(database).session  # pylint: disable=disallowed-name
+        session: Session = inspect(database).session
         # load existing tables
         predicate = or_(
             *[

@@ -21,9 +21,8 @@ import os
 import random
 import string
 import sys
-from collections.abc import Iterator
 from datetime import date, datetime, time, timedelta
-from typing import Any, Callable, cast, Optional, TypedDict
+from typing import Any, Callable, cast, Dict, Iterator, List, Optional, Type
 from uuid import uuid4
 
 import sqlalchemy.sql.sqltypes
@@ -31,21 +30,26 @@ import sqlalchemy_utils
 from flask_appbuilder import Model
 from sqlalchemy import Column, inspect, MetaData, Table
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.orm import Session
 from sqlalchemy.sql import func
 from sqlalchemy.sql.visitors import VisitableType
+from typing_extensions import TypedDict
 
 from superset import db
 
 logger = logging.getLogger(__name__)
 
-
-class ColumnInfo(TypedDict):
-    name: str
-    type: VisitableType
-    nullable: bool
-    default: Optional[Any]
-    autoincrement: str
-    primary_key: int
+ColumnInfo = TypedDict(
+    "ColumnInfo",
+    {
+        "name": str,
+        "type": VisitableType,
+        "nullable": bool,
+        "default": Optional[Any],
+        "autoincrement": str,
+        "primary_key": int,
+    },
+)
 
 
 example_column = {
@@ -163,7 +167,7 @@ def get_type_generator(  # pylint: disable=too-many-return-statements,too-many-b
 
 
 def add_data(
-    columns: Optional[list[ColumnInfo]],
+    columns: Optional[List[ColumnInfo]],
     num_rows: int,
     table_name: str,
     append: bool = True,
@@ -187,7 +191,7 @@ def add_data(
     with database.get_sqla_engine_with_context() as engine:
         if columns is None:
             if not table_exists:
-                raise Exception(  # pylint: disable=broad-exception-raised
+                raise Exception(
                     f"The table {table_name} does not exist. To create it you need to "
                     "pass a list of column names and types."
                 )
@@ -208,16 +212,16 @@ def add_data(
         engine.execute(table.insert(), data)
 
 
-def get_column_objects(columns: list[ColumnInfo]) -> list[Column]:
+def get_column_objects(columns: List[ColumnInfo]) -> List[Column]:
     out = []
     for column in columns:
-        kwargs = cast(dict[str, Any], column.copy())
+        kwargs = cast(Dict[str, Any], column.copy())
         kwargs["type_"] = kwargs.pop("type")
         out.append(Column(**kwargs))
     return out
 
 
-def generate_data(columns: list[ColumnInfo], num_rows: int) -> list[dict[str, Any]]:
+def generate_data(columns: List[ColumnInfo], num_rows: int) -> List[Dict[str, Any]]:
     keys = [column["name"] for column in columns]
     return [
         dict(zip(keys, row))
@@ -225,15 +229,17 @@ def generate_data(columns: list[ColumnInfo], num_rows: int) -> list[dict[str, An
     ]
 
 
-def generate_column_data(column: ColumnInfo, num_rows: int) -> list[Any]:
+def generate_column_data(column: ColumnInfo, num_rows: int) -> List[Any]:
     gen = get_type_generator(column["type"])
     return [gen() for _ in range(num_rows)]
 
 
-def add_sample_rows(model: type[Model], count: int) -> Iterator[Model]:
+def add_sample_rows(
+    session: Session, model: Type[Model], count: int
+) -> Iterator[Model]:
     """
     Add entities of a given model.
-
+    :param Session session: an SQLAlchemy session
     :param Model model: a Superset/FAB model
     :param int count: how many entities to generate and insert
     """
@@ -241,7 +247,7 @@ def add_sample_rows(model: type[Model], count: int) -> Iterator[Model]:
 
     # select samples to copy relationship values
     relationships = inspector.relationships.items()
-    samples = db.session.query(model).limit(count).all() if relationships else []
+    samples = session.query(model).limit(count).all() if relationships else []
 
     max_primary_key: Optional[int] = None
     for i in range(count):
@@ -252,7 +258,7 @@ def add_sample_rows(model: type[Model], count: int) -> Iterator[Model]:
             if column.primary_key:
                 if max_primary_key is None:
                     max_primary_key = (
-                        db.session.query(func.max(getattr(model, column.name))).scalar()
+                        session.query(func.max(getattr(model, column.name))).scalar()
                         or 0
                     )
                 max_primary_key += 1

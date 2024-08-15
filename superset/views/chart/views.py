@@ -19,9 +19,11 @@ from flask_appbuilder.models.sqla.interface import SQLAInterface
 from flask_babel import lazy_gettext as _
 
 from superset import security_manager
-from superset.constants import MODEL_VIEW_RW_METHOD_PERMISSION_MAP, RouteMethod
+from superset.constants import MODEL_VIEW_RW_METHOD_PERMISSION_MAP, RouteMethod, \
+    MenuName
 from superset.models.slice import Slice
 from superset.superset_typing import FlaskResponse
+from superset.sys_manager.menus.dao import SysMenuDAO
 from superset.utils import core as utils
 from superset.views.base import DeleteMixin, SupersetModelView
 from superset.views.chart.mixin import SliceMixin
@@ -50,13 +52,7 @@ class SliceModelView(
     def pre_delete(self, item: "SliceModelView") -> None:
         security_manager.raise_for_ownership(item)
 
-    @expose(
-        "/add",
-        methods=(
-            "GET",
-            "POST",
-        ),
-    )
+    @expose("/add", methods=["GET", "POST"])
     @has_access
     def add(self) -> FlaskResponse:
         return super().render_app_template()
@@ -64,6 +60,8 @@ class SliceModelView(
     @expose("/list/")
     @has_access
     def list(self) -> FlaskResponse:
+        menu = SysMenuDAO.find_by_name(MenuName.CHART)
+        menu.can_access()
         return super().render_app_template()
 
 

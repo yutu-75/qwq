@@ -14,15 +14,25 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+"""
+修改：李洪浩-20221220
+修改内容：user_job_info函数放入views包中提供导入接口
+
+"""
 from . import (
+    access_requests,
     alerts,
     api,
     base,
     core,
     css_templates,
+    dashboard,
+    datasource,
     dynamic_plugins,
     health,
+    redirects,
     sql_lab,
     tags,
+    user_job_info
 )
 from .log import api as log_api, views

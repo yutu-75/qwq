@@ -14,10 +14,14 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-import builtins
 import json
+import base64
+import logging
+import urllib.parse
 import re
-from typing import Callable, Union
+import uuid
+from datetime import datetime
+from typing import Callable, List, Union
 
 from flask import g, redirect, request, Response
 from flask_appbuilder import expose
@@ -27,11 +31,14 @@ from flask_appbuilder.security.decorators import has_access
 from flask_babel import gettext as __, lazy_gettext as _
 from flask_login import AnonymousUserMixin, login_user
 
-from superset import db, event_logger, is_feature_enabled, security_manager
-from superset.constants import MODEL_VIEW_RW_METHOD_PERMISSION_MAP, RouteMethod
+from superset import db, event_logger, is_feature_enabled, security_manager, conf
+from superset.constants import MODEL_VIEW_RW_METHOD_PERMISSION_MAP, RouteMethod, \
+    MenuName
 from superset.models.dashboard import Dashboard as DashboardModel
 from superset.superset_typing import FlaskResponse
+from superset.sys_manager.menus.dao import SysMenuDAO
 from superset.utils import core as utils
+from superset.v2.dashboards.commands.create import DashboardV2CreateCommand
 from superset.views.base import (
     BaseSupersetView,
     common_bootstrap_payload,
@@ -40,6 +47,8 @@ from superset.views.base import (
     SupersetModelView,
 )
 from superset.views.dashboard.mixin import DashboardMixin
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardModelView(
@@ -61,24 +70,25 @@ class DashboardModelView(
     @has_access
     @expose("/list/")
     def list(self) -> FlaskResponse:
+        menu = SysMenuDAO.find_by_name(MenuName.DASHBOARD)
+        menu.can_access()
         return super().render_app_template()
 
     @action("mulexport", __("Export"), __("Export dashboards?"), "fa-database")
-    def mulexport(
-        self,
-        items: Union["DashboardModelView", builtins.list["DashboardModelView"]],
+    def mulexport(  # pylint: disable=no-self-use
+        self, items: Union["DashboardModelView", List["DashboardModelView"]]
     ) -> FlaskResponse:
         if not isinstance(items, list):
             items = [items]
-        ids = "".join(f"&id={d.id}" for d in items)
-        return redirect(f"/dashboard/export_dashboards_form?{ids[1:]}")
+        ids = "".join("&id={}".format(d.id) for d in items)
+        return redirect("/dashboard/export_dashboards_form?{}".format(ids[1:]))
 
     @event_logger.log_this
     @has_access
     @expose("/export_dashboards_form")
     def download_dashboards(self) -> FlaskResponse:
         if request.args.get("action") == "go":
-            ids = set(request.args.getlist("id"))
+            ids = request.args.getlist("id")
             return Response(
                 DashboardModel.export_dashboards(ids),
                 headers=generate_download_headers("json"),
@@ -106,6 +116,18 @@ class DashboardModelView(
         self.pre_add(item)
 
 
+# 用研看板标签数据解码
+def base_64(encrypted_base64_str: str):
+    decoded_string = base64.b64decode(encrypted_base64_str).decode('utf-8')
+    decoded_string = urllib.parse.unquote(decoded_string)
+    decoded_object = json.loads(decoded_string)
+    result = decoded_object.get('data').get('actions')
+    if result:
+        return result[0].get('thirdTag')
+    else:
+        return None
+
+
 class Dashboard(BaseSupersetView):
     """The base views for Superset!"""
 
@@ -114,15 +136,42 @@ class Dashboard(BaseSupersetView):
 
     @has_access
     @expose("/new/")
-    def new(self) -> FlaskResponse:
+    def new(self) -> FlaskResponse:  # pylint: disable=no-self-use
         """Creates a new, blank dashboard and redirects to it in edit mode"""
-        new_dashboard = DashboardModel(
-            dashboard_title="[ untitled dashboard ]",
+        metadata = {}
+        if is_feature_enabled("ENABLE_FILTER_BOX_MIGRATION"):
+            metadata = {
+                "native_filter_configuration": [],
+                "show_native_filters": True,
+            }
+        third_t = request.args.get('control')
+        if third_t:
+            third_tag = base_64(third_t)
+        else:
+            third_tag = None
+        zzfx_group_id = DashboardModel.get_zzfx_group_id()
+        logger.info(f"zzfx_group_id>>>>>>type:{type(zzfx_group_id)}>>>{zzfx_group_id}")
+
+        dashboard_title = f'[ 新看板 {datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-4]} ]'
+
+        item = dict(
+            dashboard_title=dashboard_title,
             owners=[g.user],
+            json_metadata=json.dumps(metadata, sort_keys=True),
+            dashboard_group_id=request.args.get("group_id", zzfx_group_id),
+            third_tags=third_tag
         )
-        db.session.add(new_dashboard)
-        db.session.commit()
-        return redirect(f"/superset/dashboard/{new_dashboard.id}/?edit=true")
+
+        new_dashboard = DashboardV2CreateCommand(g.user, item).run()
+        control = request.args.get("control")
+        standalone = request.args.get("standalone")
+        url = f"{conf['STATIC_ASSETS_PREFIX']}/superset/dashboard/{new_dashboard.id}/?edit=true"
+        if standalone.strip():
+            url += f"&standalone={standalone}"
+        if control.strip():
+            url += f"&control={control}"
+
+        return redirect(url)
 
     @expose("/<dashboard_id_or_slug>/embedded")
     @event_logger.log_this_with_extra_payload
@@ -151,7 +200,7 @@ class Dashboard(BaseSupersetView):
         )
 
         bootstrap_data = {
-            "common": common_bootstrap_payload(),
+            "common": common_bootstrap_payload(g.user),
             "embedded": {"dashboard_id": dashboard_id_or_slug},
         }
 

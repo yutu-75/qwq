@@ -18,19 +18,25 @@ import logging
 
 from flask import g, request, Response
 from flask_appbuilder.api import expose, protect, safe
+from superset import db
 
-from superset.commands.chart.exceptions import ChartNotFoundError
-from superset.commands.explore.get import GetExploreCommand
-from superset.commands.explore.parameters import CommandParameters
-from superset.commands.temporary_cache.exceptions import (
-    TemporaryCacheAccessDeniedError,
-    TemporaryCacheResourceNotFoundError,
-)
+from superset.charts.commands.exceptions import ChartNotFoundError
+from superset.connectors.sqla.models import SqlaTable, TableColumn, DatasetCategory
 from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP
+from superset.exceptions import HTTPError
+from superset.explore.commands.get import GetExploreCommand
+from superset.explore.commands.parameters import CommandParameters
 from superset.explore.exceptions import DatasetAccessDeniedError, WrongEndpointError
 from superset.explore.permalink.exceptions import ExplorePermalinkGetFailedError
 from superset.explore.schemas import ExploreContextSchema
 from superset.extensions import event_logger
+from superset.models.core import Database
+from superset.models.slice import Slice
+from superset.temporary_cache.commands.exceptions import (
+    TemporaryCacheAccessDeniedError,
+    TemporaryCacheResourceNotFoundError,
+)
+from superset.v2.datasets.commands.get_data_command import DatasetDataCommand
 from superset.views.base_api import BaseSupersetApi, statsd_metrics
 
 logger = logging.getLogger(__name__)
@@ -44,7 +50,7 @@ class ExploreRestApi(BaseSupersetApi):
     openapi_spec_tag = "Explore"
     openapi_spec_component_schemas = (ExploreContextSchema,)
 
-    @expose("/", methods=("GET",))
+    @expose("/", methods=["GET"])
     @protect()
     @safe
     @statsd_metrics
@@ -53,14 +59,16 @@ class ExploreRestApi(BaseSupersetApi):
         log_to_statsd=True,
     )
     def get(self) -> Response:
-        """Assemble Explore related information (form_data, slice, dataset)
-        in a single endpoint.
+        """Assembles Explore related information (form_data, slice, dataset)
+         in a single endpoint.
         ---
         get:
-          summary: Assemble Explore related information in a single endpoint
+          summary: >-
+            Assembles Explore related information (form_data, slice, dataset)
+             in a single endpoint.
           description: >-
-            Assembles Explore related information (form_data, slice, dataset) in a
-            single endpoint.<br/><br/>
+            Assembles Explore related information (form_data, slice, dataset)
+             in a single endpoint.<br/><br/>
             The information can be assembled from:<br/>
             - The cache using a form_data_key<br/>
             - The metadata database using a permalink_key<br/>
@@ -114,6 +122,46 @@ class ExploreRestApi(BaseSupersetApi):
                 slice_id=request.args.get("slice_id", type=int),
             )
             result = GetExploreCommand(params).run()
+            datasource_id = None
+            if params.slice_id:
+                # 创建查询对象并执行查询
+                all_slices = db.session.query(Slice).filter_by(
+                    id=params.slice_id).all()
+                # 遍历结果并打印
+                for slice in all_slices:
+                    datasource_id = slice.datasource_id
+            elif params.datasource_id:
+                datasource_id = params.datasource_id
+            if datasource_id:
+                all_table_columns = db.session.query(TableColumn).filter_by(
+                    table_id=datasource_id).all()
+                data = db.session.query(DatasetCategory).filter_by(
+                    table_id=datasource_id).all()
+                result["dataset"]["category_field"] = []
+                if data:
+                    item = data[0]
+                    data_upload = DatasetDataCommand(g.user, datasource_id).run(
+                        **request.args)
+                    for table_columns in all_table_columns:
+                        column_name = table_columns.column_name
+                        for itemm in data_upload['data']:
+                            if column_name == itemm.get(item.field_code):
+                                first_cate = itemm.get(item.first_cate_field)
+                                second_cate = itemm.get(item.second_cate_field)
+                                is_cross = itemm.get(item.is_cross_field)
+                                field_code = itemm.get(item.field_code)
+
+                                columns_data = {
+                                    "field_code": field_code,
+                                    "first_cate": first_cate,
+                                    "second_cate": second_cate,
+                                    "is_cross": is_cross
+                                }
+                                # 在指定的索引位置插入columns_data
+                                index_to_insert = 0  # 将columns_data插入到索引为0的位置
+                                result["dataset"]["category_field"].insert(
+                                    index_to_insert, columns_data)
+                                break
             if not result:
                 return self.response_404()
             return self.response(200, result=result)
@@ -134,3 +182,5 @@ class ExploreRestApi(BaseSupersetApi):
             return self.response(403, message=str(ex))
         except TemporaryCacheResourceNotFoundError as ex:
             return self.response(404, message=str(ex))
+        except HTTPError as ex:
+            return self.response(403, message=str(ex))

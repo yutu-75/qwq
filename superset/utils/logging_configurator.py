@@ -64,5 +64,6 @@ class DefaultLoggingConfigurator(  # pylint: disable=too-few-public-methods
                 backupCount=app_config["BACKUP_COUNT"],
             )
             logging.getLogger().addHandler(handler)
+            logger.info(app_config["FILENAME"])
 
         logger.info("logging was configured successfully")

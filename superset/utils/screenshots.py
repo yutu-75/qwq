@@ -14,33 +14,34 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
+# ------------------------------------------------------------------
+# File Name:        screenshots.py
+# Author:           王邦权
+# Version:          screenshots-001
+# Created:          2023/6/14
+# Rows:             88
+# Description:      新增 get_pdf 获取屏幕截图pdf
+# ------------------------------------------------------------------
+
 from __future__ import annotations
 
 import logging
 from io import BytesIO
-from typing import TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Union
 
 from flask import current_app
 
-from superset import feature_flag_manager
 from superset.utils.hashing import md5_sha_from_dict
 from superset.utils.urls import modify_url_query
 from superset.utils.webdriver import (
     ChartStandaloneMode,
     DashboardStandaloneMode,
-    WebDriver,
-    WebDriverPlaywright,
-    WebDriverSelenium,
+    WebDriverProxy,
     WindowSize,
 )
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_SCREENSHOT_WINDOW_SIZE = 800, 600
-DEFAULT_SCREENSHOT_THUMBNAIL_SIZE = 400, 300
-DEFAULT_CHART_WINDOW_SIZE = DEFAULT_CHART_THUMBNAIL_SIZE = 800, 600
-DEFAULT_DASHBOARD_WINDOW_SIZE = 1600, 1200
-DEFAULT_DASHBOARD_THUMBNAIL_SIZE = 800, 600
 
 try:
     from PIL import Image
@@ -56,24 +57,22 @@ class BaseScreenshot:
     driver_type = current_app.config["WEBDRIVER_TYPE"]
     thumbnail_type: str = ""
     element: str = ""
-    window_size: WindowSize = DEFAULT_SCREENSHOT_WINDOW_SIZE
-    thumb_size: WindowSize = DEFAULT_SCREENSHOT_THUMBNAIL_SIZE
+    window_size: WindowSize = (800, 600)
+    thumb_size: WindowSize = (400, 300)
 
     def __init__(self, url: str, digest: str):
         self.digest: str = digest
         self.url = url
-        self.screenshot: bytes | None = None
+        self.screenshot: Optional[bytes] = None
 
-    def driver(self, window_size: WindowSize | None = None) -> WebDriver:
+    def driver(self, window_size: Optional[WindowSize] = None) -> WebDriverProxy:
         window_size = window_size or self.window_size
-        if feature_flag_manager.is_feature_enabled("PLAYWRIGHT_REPORTS_AND_THUMBNAILS"):
-            return WebDriverPlaywright(self.driver_type, window_size)
-        return WebDriverSelenium(self.driver_type, window_size)
+        return WebDriverProxy(self.driver_type, window_size)
 
     def cache_key(
         self,
-        window_size: bool | WindowSize | None = None,
-        thumb_size: bool | WindowSize | None = None,
+        window_size: Optional[Union[bool, WindowSize]] = None,
+        thumb_size: Optional[Union[bool, WindowSize]] = None,
     ) -> str:
         window_size = window_size or self.window_size
         thumb_size = thumb_size or self.thumb_size
@@ -87,18 +86,29 @@ class BaseScreenshot:
         return md5_sha_from_dict(args)
 
     def get_screenshot(
-        self, user: User, window_size: WindowSize | None = None
-    ) -> bytes | None:
+        self, user: User, window_size: Optional[WindowSize] = None, creator: User = None
+    ) -> Optional[bytes]:
         driver = self.driver(window_size)
-        self.screenshot = driver.get_screenshot(self.url, self.element, user)
+        self.screenshot = driver.get_screenshot(self.url, self.element, user, creator)
         return self.screenshot
+
+    # --------  screenshots-001  strat  --------
+    def get_pdf(
+            self, user: "User", window_size: Optional[WindowSize] = None
+    ) -> Optional[bytes]:
+        driver = self.driver(window_size)
+        self.screenshot = driver.get_pdf(self.url, self.element, user)
+
+        return self.screenshot
+
+    # --------  screenshots-001  end  --------
 
     def get(
         self,
         user: User = None,
         cache: Cache = None,
-        thumb_size: WindowSize | None = None,
-    ) -> BytesIO | None:
+        thumb_size: Optional[WindowSize] = None,
+    ) -> Optional[BytesIO]:
         """
             Get thumbnail screenshot has BytesIO from cache or fetch
 
@@ -106,7 +116,7 @@ class BaseScreenshot:
         :param cache: The cache to use
         :param thumb_size: Override thumbnail site
         """
-        payload: bytes | None = None
+        payload: Optional[bytes] = None
         cache_key = self.cache_key(self.window_size, thumb_size)
         if cache:
             payload = cache.get(cache_key)
@@ -123,16 +133,17 @@ class BaseScreenshot:
     def get_from_cache(
         self,
         cache: Cache,
-        window_size: WindowSize | None = None,
-        thumb_size: WindowSize | None = None,
-    ) -> BytesIO | None:
+        window_size: Optional[WindowSize] = None,
+        thumb_size: Optional[WindowSize] = None,
+    ) -> Optional[BytesIO]:
         cache_key = self.cache_key(window_size, thumb_size)
         return self.get_from_cache_key(cache, cache_key)
 
     @staticmethod
-    def get_from_cache_key(cache: Cache, cache_key: str) -> BytesIO | None:
+    def get_from_cache_key(cache: Cache, cache_key: str) -> Optional[BytesIO]:
         logger.info("Attempting to get from cache: %s", cache_key)
-        if payload := cache.get(cache_key):
+        payload = cache.get(cache_key)
+        if payload:
             return BytesIO(payload)
         logger.info("Failed at getting from cache: %s", cache_key)
         return None
@@ -140,11 +151,11 @@ class BaseScreenshot:
     def compute_and_cache(  # pylint: disable=too-many-arguments
         self,
         user: User = None,
-        window_size: WindowSize | None = None,
-        thumb_size: WindowSize | None = None,
+        window_size: Optional[WindowSize] = None,
+        thumb_size: Optional[WindowSize] = None,
         cache: Cache = None,
         force: bool = True,
-    ) -> bytes | None:
+    ) -> Optional[bytes]:
         """
         Fetches the screenshot, computes the thumbnail and caches the result
 
@@ -189,7 +200,7 @@ class BaseScreenshot:
         cls,
         img_bytes: bytes,
         output: str = "png",
-        thumb_size: WindowSize | None = None,
+        thumb_size: Optional[WindowSize] = None,
         crop: bool = True,
     ) -> bytes:
         thumb_size = thumb_size or cls.thumb_size
@@ -201,7 +212,7 @@ class BaseScreenshot:
             logger.debug("Cropping to: %s*%s", str(img.size[0]), str(desired_width))
             img = img.crop((0, 0, img.size[0], desired_width))
         logger.debug("Resizing to %s", str(thumb_size))
-        img = img.resize(thumb_size, Image.Resampling.LANCZOS)
+        img = img.resize(thumb_size, Image.ANTIALIAS)
         new_img = BytesIO()
         if output != "png":
             img = img.convert("RGB")
@@ -218,8 +229,8 @@ class ChartScreenshot(BaseScreenshot):
         self,
         url: str,
         digest: str,
-        window_size: WindowSize | None = None,
-        thumb_size: WindowSize | None = None,
+        window_size: Optional[WindowSize] = None,
+        thumb_size: Optional[WindowSize] = None,
     ):
         # Chart reports are in standalone="true" mode
         url = modify_url_query(
@@ -227,8 +238,8 @@ class ChartScreenshot(BaseScreenshot):
             standalone=ChartStandaloneMode.HIDE_NAV.value,
         )
         super().__init__(url, digest)
-        self.window_size = window_size or DEFAULT_CHART_WINDOW_SIZE
-        self.thumb_size = thumb_size or DEFAULT_CHART_THUMBNAIL_SIZE
+        self.window_size = window_size or (800, 600)
+        self.thumb_size = thumb_size or (800, 600)
 
 
 class DashboardScreenshot(BaseScreenshot):
@@ -239,8 +250,8 @@ class DashboardScreenshot(BaseScreenshot):
         self,
         url: str,
         digest: str,
-        window_size: WindowSize | None = None,
-        thumb_size: WindowSize | None = None,
+        window_size: Optional[WindowSize] = None,
+        thumb_size: Optional[WindowSize] = None,
     ):
         # per the element above, dashboard screenshots
         # should always capture in standalone
@@ -250,5 +261,5 @@ class DashboardScreenshot(BaseScreenshot):
         )
 
         super().__init__(url, digest)
-        self.window_size = window_size or DEFAULT_DASHBOARD_WINDOW_SIZE
-        self.thumb_size = thumb_size or DEFAULT_DASHBOARD_THUMBNAIL_SIZE
+        self.window_size = window_size or (1600, 1200)
+        self.thumb_size = thumb_size or (800, 600)

@@ -15,20 +15,24 @@
 # specific language governing permissions and limitations
 # under the License.
 import logging
-
+import requests
 from flask import request, Response
 from flask_appbuilder.api import expose, protect, safe
 from marshmallow import ValidationError
-
-from superset.commands.dashboard.exceptions import (
+import time
+from urllib.parse import urlencode
+from superset import conf
+from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP
+from superset.dashboards.commands.exceptions import (
     DashboardAccessDeniedError,
     DashboardNotFoundError,
 )
-from superset.commands.dashboard.permalink.create import CreateDashboardPermalinkCommand
-from superset.commands.dashboard.permalink.get import GetDashboardPermalinkCommand
-from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP
+from superset.dashboards.permalink.commands.create import (
+    CreateDashboardPermalinkCommand,
+)
+from superset.dashboards.permalink.commands.get import GetDashboardPermalinkCommand
 from superset.dashboards.permalink.exceptions import DashboardPermalinkInvalidStateError
-from superset.dashboards.permalink.schemas import DashboardPermalinkStateSchema
+from superset.dashboards.permalink.schemas import DashboardPermalinkPostSchema
 from superset.extensions import event_logger
 from superset.key_value.exceptions import KeyValueAccessDeniedError
 from superset.views.base_api import BaseSupersetApi, requires_json
@@ -37,15 +41,15 @@ logger = logging.getLogger(__name__)
 
 
 class DashboardPermalinkRestApi(BaseSupersetApi):
-    add_model_schema = DashboardPermalinkStateSchema()
+    add_model_schema = DashboardPermalinkPostSchema()
     method_permission_name = MODEL_API_RW_METHOD_PERMISSION_MAP
     allow_browser_login = True
     class_permission_name = "DashboardPermalinkRestApi"
     resource_name = "dashboard"
     openapi_spec_tag = "Dashboard Permanent Link"
-    openapi_spec_component_schemas = (DashboardPermalinkStateSchema,)
+    openapi_spec_component_schemas = (DashboardPermalinkPostSchema,)
 
-    @expose("/<pk>/permalink", methods=("POST",))
+    @expose("/<pk>/permalink", methods=["POST"])
     @protect()
     @safe
     @event_logger.log_this_with_context(
@@ -54,10 +58,11 @@ class DashboardPermalinkRestApi(BaseSupersetApi):
     )
     @requires_json
     def post(self, pk: str) -> Response:
-        """Create a new dashboard's permanent link.
+        """Stores a new permanent link.
         ---
         post:
-          summary: Create a new dashboard's permanent link
+          description: >-
+            Stores a new permanent link.
           parameters:
           - in: path
             schema:
@@ -68,7 +73,7 @@ class DashboardPermalinkRestApi(BaseSupersetApi):
             content:
               application/json:
                 schema:
-                  $ref: '#/components/schemas/DashboardPermalinkStateSchema'
+                  $ref: '#/components/schemas/DashboardPermalinkPostSchema'
           responses:
             201:
               description: The permanent link was stored successfully.
@@ -94,12 +99,22 @@ class DashboardPermalinkRestApi(BaseSupersetApi):
         """
         try:
             state = self.add_model_schema.load(request.json)
+            temporary = request.args.get('temporary')
+            if temporary:
+                temporary = True
+            else:
+                temporary = False
+            # temporary-true,临时链接，temporary-false,永久链接
             key = CreateDashboardPermalinkCommand(
                 dashboard_id=pk,
                 state=state,
+                temporary=temporary,
             ).run()
             http_origin = request.headers.environ.get("HTTP_ORIGIN")
-            url = f"{http_origin}/superset/dashboard/p/{key}/"
+            # 增加前缀/superset
+            timestamp = int(time.time())
+            url = f"{http_origin}{conf.get('STATIC_ASSETS_PREFIX')}/superset/dashboard/p/{key}/?id={pk}&timestamp={timestamp}"
+            # requests.Session().get(url)   # 移动端预览微信二维码扫描报错403问题解决
             return self.response(201, key=key, url=url)
         except (ValidationError, DashboardPermalinkInvalidStateError) as ex:
             return self.response(400, message=str(ex))
@@ -111,7 +126,7 @@ class DashboardPermalinkRestApi(BaseSupersetApi):
         except DashboardNotFoundError as ex:
             return self.response(404, message=str(ex))
 
-    @expose("/permalink/<string:key>", methods=("GET",))
+    @expose("/permalink/<string:key>", methods=["GET"])
     @protect()
     @safe
     @event_logger.log_this_with_context(
@@ -119,10 +134,11 @@ class DashboardPermalinkRestApi(BaseSupersetApi):
         log_to_statsd=False,
     )
     def get(self, key: str) -> Response:
-        """Get dashboard's permanent link state.
+        """Retrives permanent link state for dashboard.
         ---
         get:
-          summary: Get dashboard's permanent link state
+          description: >-
+            Retrives dashboard state associated with a permanent link.
           parameters:
           - in: path
             schema:

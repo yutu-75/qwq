@@ -14,16 +14,16 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-# pylint: disable=too-many-lines
 import json
 import logging
 from datetime import datetime
 from io import BytesIO
-from typing import Any, cast, Optional
+from typing import Any, cast, Optional, Dict
 from zipfile import is_zipfile, ZipFile
 
-from flask import redirect, request, Response, send_file, url_for
-from flask_appbuilder.api import expose, protect, rison, safe
+from flask import redirect, request, Response, send_file, url_for, g
+from flask_appbuilder.api import expose, protect, rison, safe, get_list_schema
+from flask_appbuilder.const import API_RESULT_RES_KEY
 from flask_appbuilder.hooks import before_request
 from flask_appbuilder.models.sqla.interface import SQLAInterface
 from flask_babel import ngettext
@@ -32,6 +32,22 @@ from werkzeug.wrappers import Response as WerkzeugResponse
 from werkzeug.wsgi import FileWrapper
 
 from superset import app, is_feature_enabled, thumbnail_cache
+from superset.charts.commands.bulk_delete import BulkDeleteChartCommand
+from superset.charts.commands.create import CreateChartCommand
+from superset.charts.commands.delete import DeleteChartCommand
+from superset.charts.commands.exceptions import (
+    ChartBulkDeleteFailedError,
+    ChartCreateFailedError,
+    ChartDeleteFailedError,
+    ChartForbiddenError,
+    ChartInvalidError,
+    ChartNotFoundError,
+    ChartUpdateFailedError,
+)
+from superset.charts.commands.export import ExportChartsCommand
+from superset.charts.commands.importers.dispatcher import ImportChartsCommand
+from superset.charts.commands.update import UpdateChartCommand
+from superset.charts.dao import ChartDAO
 from superset.charts.filters import (
     ChartAllTextFilter,
     ChartCertifiedFilter,
@@ -39,12 +55,9 @@ from superset.charts.filters import (
     ChartFavoriteFilter,
     ChartFilter,
     ChartHasCreatedByFilter,
-    ChartOwnedCreatedFavoredByMeFilter,
-    ChartTagFilter,
 )
 from superset.charts.schemas import (
     CHART_SCHEMAS,
-    ChartCacheWarmUpRequestSchema,
     ChartPostSchema,
     ChartPutSchema,
     get_delete_ids_schema,
@@ -54,35 +67,27 @@ from superset.charts.schemas import (
     screenshot_query_schema,
     thumbnail_query_schema,
 )
-from superset.commands.chart.create import CreateChartCommand
-from superset.commands.chart.delete import DeleteChartCommand
-from superset.commands.chart.exceptions import (
-    ChartCreateFailedError,
-    ChartDeleteFailedError,
-    ChartForbiddenError,
-    ChartInvalidError,
-    ChartNotFoundError,
-    ChartUpdateFailedError,
-    DashboardsForbiddenError,
-)
-from superset.commands.chart.export import ExportChartsCommand
-from superset.commands.chart.importers.dispatcher import ImportChartsCommand
-from superset.commands.chart.update import UpdateChartCommand
-from superset.commands.chart.warm_up_cache import ChartWarmUpCacheCommand
-from superset.commands.exceptions import CommandException
 from superset.commands.importers.exceptions import (
     IncorrectFormatError,
     NoValidFilesFoundError,
 )
 from superset.commands.importers.v1.utils import get_contents_from_bundle
-from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP, RouteMethod
-from superset.daos.chart import ChartDAO
+from superset.constants import MODEL_API_RW_METHOD_PERMISSION_MAP, RouteMethod, \
+    AuthSourceType, VIEW
+from superset.dashboards.api_decorator import api_validate_decorator
+from superset.dashboards.schemas import UserSchema, RolesSchema
+from superset.exceptions import HTTPError
 from superset.extensions import event_logger
+from superset.logs_messages import LogsMessages
 from superset.models.slice import Slice
 from superset.tasks.thumbnails import cache_chart_thumbnail
 from superset.tasks.utils import get_current_user
-from superset.utils.screenshots import ChartScreenshot, DEFAULT_CHART_WINDOW_SIZE
+from superset.tripartite_attribute.tripartite_api_log import record_tripartite_api_log
+from superset.tripartite_attribute.tripartite_certification import \
+    tripartite_certification, verify_slice_role
+from superset.utils.screenshots import ChartScreenshot
 from superset.utils.urls import get_url_path
+from superset.v2.charts.dao import ChartV2DAO
 from superset.views.base_api import (
     BaseSupersetModelRestApi,
     RelatedFieldFilter,
@@ -94,6 +99,9 @@ from superset.views.filters import BaseFilterRelatedUsers, FilterRelatedOwners
 
 logger = logging.getLogger(__name__)
 config = app.config
+
+dashboard_title = "dashboards.dashboard_title"
+dashboards_id = "dashboards.id"
 
 
 class ChartRestApi(BaseSupersetModelRestApi):
@@ -108,6 +116,22 @@ class ChartRestApi(BaseSupersetModelRestApi):
             return self.response_404()
         return None
 
+    def pre_get_list(self, data: Dict[str, Any]) -> None:
+        if g.user.is_admin:
+            return
+
+        data_auth = ChartV2DAO.find_auth_source_perm_by_user(
+            AuthSourceType.CHART, g.user.id, VIEW)
+        ids = []
+        result = []
+        for item in data["result"]:
+            if data_auth.get(item["id"], False):
+                result.append(item)
+                ids.append(item["id"])
+
+        data["ids"] = ids
+        data["result"] = result
+
     include_route_methods = RouteMethod.REST_MODEL_VIEW_CRUD_SET | {
         RouteMethod.EXPORT,
         RouteMethod.IMPORT,
@@ -115,12 +139,11 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "bulk_delete",  # not using RouteMethod since locally defined
         "viz_types",
         "favorite_status",
-        "add_favorite",
-        "remove_favorite",
         "thumbnail",
         "screenshot",
         "cache_screenshot",
-        "warm_up_cache",
+        "simple",
+        "chart_del"
     }
     class_permission_name = "Chart"
     method_permission_name = MODEL_API_RW_METHOD_PERMISSION_MAP
@@ -129,16 +152,17 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "certified_by",
         "certification_details",
         "changed_on_delta_humanized",
-        "dashboards.dashboard_title",
-        "dashboards.id",
+        dashboard_title,
+        dashboards_id,
         "dashboards.json_metadata",
         "description",
         "id",
         "owners.first_name",
         "owners.id",
         "owners.last_name",
-        "dashboards.id",
-        "dashboards.dashboard_title",
+        "owners.username",
+        dashboards_id,
+        dashboard_title,
         "params",
         "slice_name",
         "thumbnail_url",
@@ -146,11 +170,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "viz_type",
         "query_context",
         "is_managed_externally",
-        "tags.id",
-        "tags.name",
-        "tags.type",
     ]
-
     show_select_columns = show_columns + ["table.id"]
     list_columns = [
         "is_managed_externally",
@@ -159,15 +179,13 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "cache_timeout",
         "changed_by.first_name",
         "changed_by.last_name",
-        "changed_by.id",
         "changed_by_name",
+        "changed_by_url",
         "changed_on_delta_humanized",
-        "changed_on_dttm",
         "changed_on_utc",
         "created_by.first_name",
         "created_by.id",
         "created_by.last_name",
-        "created_by_name",
         "created_on_delta_humanized",
         "datasource_id",
         "datasource_name_text",
@@ -176,7 +194,6 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "description",
         "description_markeddown",
         "edit_url",
-        "form_data",
         "id",
         "last_saved_at",
         "last_saved_by.id",
@@ -185,19 +202,16 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "owners.first_name",
         "owners.id",
         "owners.last_name",
-        "dashboards.id",
-        "dashboards.dashboard_title",
+        "owners.username",
+        dashboards_id,
+        dashboard_title,
         "params",
         "slice_name",
-        "slice_url",
         "table.default_endpoint",
         "table.table_name",
         "thumbnail_url",
         "url",
         "viz_type",
-        "tags.id",
-        "tags.name",
-        "tags.type",
     ]
     list_select_columns = list_columns + ["changed_by_fk", "changed_on"]
     order_columns = [
@@ -226,20 +240,15 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "dashboards",
         "slice_name",
         "viz_type",
-        "tags",
     ]
     base_order = ("changed_on", "desc")
     base_filters = [["id", ChartFilter, lambda: []]]
     search_filters = {
-        "id": [
-            ChartFavoriteFilter,
-            ChartCertifiedFilter,
-            ChartOwnedCreatedFavoredByMeFilter,
-        ],
+        "id": [ChartFavoriteFilter, ChartCertifiedFilter],
         "slice_name": [ChartAllTextFilter],
         "created_by": [ChartHasCreatedByFilter, ChartCreatedByMeFilter],
-        "tags": [ChartTagFilter],
     }
+
     # Will just affect _info endpoint
     edit_columns = ["slice_name"]
     add_columns = edit_columns
@@ -274,9 +283,9 @@ class ChartRestApi(BaseSupersetModelRestApi):
         "created_by": RelatedFieldFilter("first_name", FilterRelatedOwners),
     }
 
-    allowed_rel_fields = {"owners", "created_by", "changed_by"}
+    allowed_rel_fields = {"owners", "created_by"}
 
-    @expose("/", methods=("POST",))
+    @expose("/", methods=["POST"])
     @protect()
     @safe
     @statsd_metrics
@@ -286,10 +295,11 @@ class ChartRestApi(BaseSupersetModelRestApi):
     )
     @requires_json
     def post(self) -> Response:
-        """Create a new chart.
+        """Creates a new Chart
         ---
         post:
-          summary: Create a new chart
+          description: >-
+            Create a new Chart.
           requestBody:
             description: Chart schema
             required: true
@@ -313,8 +323,6 @@ class ChartRestApi(BaseSupersetModelRestApi):
               $ref: '#/components/responses/400'
             401:
               $ref: '#/components/responses/401'
-            403:
-              $ref: '#/components/responses/403'
             422:
               $ref: '#/components/responses/422'
             500:
@@ -328,8 +336,8 @@ class ChartRestApi(BaseSupersetModelRestApi):
         try:
             new_model = CreateChartCommand(item).run()
             return self.response(201, id=new_model.id, result=item)
-        except DashboardsForbiddenError as ex:
-            return self.response(ex.status, message=ex.message)
+        except HTTPError as ex:
+            return self.response_422(message=ex.message)
         except ChartInvalidError as ex:
             return self.response_422(message=ex.normalized_messages())
         except ChartCreateFailedError as ex:
@@ -341,20 +349,21 @@ class ChartRestApi(BaseSupersetModelRestApi):
             )
             return self.response_422(message=str(ex))
 
-    @expose("/<pk>", methods=("PUT",))
+    @expose("/<pk>", methods=["PUT"])
     @protect()
     @safe
     @statsd_metrics
     @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.put",
+        action=LogsMessages.LM_EDIT_CHART,
         log_to_statsd=False,
     )
     @requires_json
     def put(self, pk: int) -> Response:
-        """Update a chart.
+        """Changes a Chart
         ---
         put:
-          summary: Update a chart
+          description: >-
+            Changes a Chart.
           parameters:
           - in: path
             schema:
@@ -402,7 +411,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
             response = self.response(200, id=changed_model.id, result=item)
         except ChartNotFoundError:
             response = self.response_404()
-        except ChartForbiddenError:
+        except (ChartForbiddenError, HTTPError):
             response = self.response_403()
         except ChartInvalidError as ex:
             response = self.response_422(message=ex.normalized_messages())
@@ -417,7 +426,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
 
         return response
 
-    @expose("/<pk>", methods=("DELETE",))
+    @expose("/<pk>", methods=["DELETE"])
     @protect()
     @safe
     @statsd_metrics
@@ -426,10 +435,11 @@ class ChartRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def delete(self, pk: int) -> Response:
-        """Delete a chart.
+        """Deletes a Chart
         ---
         delete:
-          summary: Delete a chart
+          description: >-
+            Deletes a Chart.
           parameters:
           - in: path
             schema:
@@ -457,7 +467,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
               $ref: '#/components/responses/500'
         """
         try:
-            DeleteChartCommand([pk]).run()
+            DeleteChartCommand(pk).run()
             return self.response(200, message="OK")
         except ChartNotFoundError:
             return self.response_404()
@@ -472,7 +482,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
             )
             return self.response_422(message=str(ex))
 
-    @expose("/", methods=("DELETE",))
+    @expose("/", methods=["DELETE"])
     @protect()
     @safe
     @statsd_metrics
@@ -482,10 +492,11 @@ class ChartRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def bulk_delete(self, **kwargs: Any) -> Response:
-        """Bulk delete charts.
+        """Delete bulk Charts
         ---
         delete:
-          summary: Bulk delete charts
+          description: >-
+            Deletes multiple Charts in a bulk operation.
           parameters:
           - in: query
             name: q
@@ -516,7 +527,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
         """
         item_ids = kwargs["rison"]
         try:
-            DeleteChartCommand(item_ids).run()
+            BulkDeleteChartCommand(item_ids).run()
             return self.response(
                 200,
                 message=ngettext(
@@ -527,24 +538,24 @@ class ChartRestApi(BaseSupersetModelRestApi):
             return self.response_404()
         except ChartForbiddenError:
             return self.response_403()
-        except ChartDeleteFailedError as ex:
+        except ChartBulkDeleteFailedError as ex:
             return self.response_422(message=str(ex))
 
-    @expose("/<pk>/cache_screenshot/", methods=("GET",))
+    @expose("/<pk>/cache_screenshot/", methods=["GET"])
     @protect()
     @rison(screenshot_query_schema)
     @safe
     @statsd_metrics
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".cache_screenshot",
+                                             f".cache_screenshot",
         log_to_statsd=False,
     )
     def cache_screenshot(self, pk: int, **kwargs: Any) -> WerkzeugResponse:
-        """Compute and cache a screenshot.
+        """
         ---
         get:
-          summary: Compute and cache a screenshot
+          description: Compute and cache a screenshot.
           parameters:
           - in: path
             schema:
@@ -573,7 +584,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
               $ref: '#/components/responses/500'
         """
         rison_dict = kwargs["rison"]
-        window_size = rison_dict.get("window_size") or DEFAULT_CHART_WINDOW_SIZE
+        window_size = rison_dict.get("window_size") or (800, 600)
 
         # Don't shrink the image if thumb_size is not specified
         thumb_size = rison_dict.get("thumb_size") or window_size
@@ -604,7 +615,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
 
         return trigger_celery()
 
-    @expose("/<pk>/screenshot/<digest>/", methods=("GET",))
+    @expose("/<pk>/screenshot/<digest>/", methods=["GET"])
     @protect()
     @safe
     @statsd_metrics
@@ -613,10 +624,10 @@ class ChartRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def screenshot(self, pk: int, digest: str) -> WerkzeugResponse:
-        """Get a computed screenshot from cache.
+        """Get Chart screenshot
         ---
         get:
-          summary: Get a computed screenshot from cache
+          description: Get a computed screenshot from cache.
           parameters:
           - in: path
             schema:
@@ -650,14 +661,15 @@ class ChartRestApi(BaseSupersetModelRestApi):
             return self.response_404()
 
         # fetch the chart screenshot using the current user and cache if set
-        if img := ChartScreenshot.get_from_cache_key(thumbnail_cache, digest):
+        img = ChartScreenshot.get_from_cache_key(thumbnail_cache, digest)
+        if img:
             return Response(
                 FileWrapper(img), mimetype="image/png", direct_passthrough=True
             )
         # TODO: return an empty image
         return self.response_404()
 
-    @expose("/<pk>/thumbnail/<digest>/", methods=("GET",))
+    @expose("/<pk>/thumbnail/<digest>/", methods=["GET"])
     @protect()
     @rison(thumbnail_query_schema)
     @safe
@@ -667,10 +679,9 @@ class ChartRestApi(BaseSupersetModelRestApi):
         log_to_statsd=False,
     )
     def thumbnail(self, pk: int, digest: str, **kwargs: Any) -> WerkzeugResponse:
-        """Compute or get already computed chart thumbnail from cache.
+        """Get Chart thumbnail
         ---
         get:
-          summary: Get chart thumbnail
           description: Compute or get already computed chart thumbnail from cache.
           parameters:
           - in: path
@@ -745,20 +756,17 @@ class ChartRestApi(BaseSupersetModelRestApi):
             FileWrapper(screenshot), mimetype="image/png", direct_passthrough=True
         )
 
-    @expose("/export/", methods=("GET",))
+    @expose("/export/", methods=["GET"])
     @protect()
     @safe
     @statsd_metrics
     @rison(get_export_ids_schema)
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.export",
-        log_to_statsd=False,
-    )
     def export(self, **kwargs: Any) -> Response:
-        """Download multiple charts as YAML files.
+        """Export charts
         ---
         get:
-          summary: Download multiple charts as YAML files
+          description: >-
+            Exports multiple charts and downloads them as YAML files
           parameters:
           - in: query
             name: q
@@ -783,6 +791,7 @@ class ChartRestApi(BaseSupersetModelRestApi):
             500:
               $ref: '#/components/responses/500'
         """
+        token = request.args.get("token")
         requested_ids = kwargs["rison"]
         timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
         root = f"chart_export_{timestamp}"
@@ -804,25 +813,26 @@ class ChartRestApi(BaseSupersetModelRestApi):
             as_attachment=True,
             download_name=filename,
         )
-        if token := request.args.get("token"):
+        if token:
             response.set_cookie(token, "done", max_age=600)
         return response
 
-    @expose("/favorite_status/", methods=("GET",))
+    @expose("/favorite_status/", methods=["GET"])
     @protect()
     @safe
     @rison(get_fav_star_ids_schema)
     @statsd_metrics
     @event_logger.log_this_with_context(
         action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".favorite_status",
+                                             f".favorite_status",
         log_to_statsd=False,
     )
     def favorite_status(self, **kwargs: Any) -> Response:
-        """Check favorited charts for current user.
+        """Favorite stars for Charts
         ---
         get:
-          summary: Check favorited charts for current user
+          description: >-
+            Check favorited dashboards for current user
           parameters:
           - in: query
             name: q
@@ -857,161 +867,27 @@ class ChartRestApi(BaseSupersetModelRestApi):
         ]
         return self.response(200, result=res)
 
-    @expose("/<pk>/favorites/", methods=("POST",))
-    @protect()
-    @safe
-    @statsd_metrics
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".add_favorite",
-        log_to_statsd=False,
-    )
-    def add_favorite(self, pk: int) -> Response:
-        """Mark the chart as favorite for the current user.
-        ---
-        post:
-          summary: Mark the chart as favorite for the current user
-          parameters:
-          - in: path
-            schema:
-              type: integer
-            name: pk
-          responses:
-            200:
-              description: Chart added to favorites
-              content:
-                application/json:
-                  schema:
-                    type: object
-                    properties:
-                      result:
-                        type: object
-            401:
-              $ref: '#/components/responses/401'
-            404:
-              $ref: '#/components/responses/404'
-            500:
-              $ref: '#/components/responses/500'
-        """
-        chart = ChartDAO.find_by_id(pk)
-        if not chart:
-            return self.response_404()
-
-        ChartDAO.add_favorite(chart)
-        return self.response(200, result="OK")
-
-    @expose("/<pk>/favorites/", methods=("DELETE",))
-    @protect()
-    @safe
-    @statsd_metrics
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".remove_favorite",
-        log_to_statsd=False,
-    )
-    def remove_favorite(self, pk: int) -> Response:
-        """Remove the chart from the user favorite list.
-        ---
-        delete:
-          summary: Remove the chart from the user favorite list
-          parameters:
-          - in: path
-            schema:
-              type: integer
-            name: pk
-          responses:
-            200:
-              description: Chart removed from favorites
-              content:
-                application/json:
-                  schema:
-                    type: object
-                    properties:
-                      result:
-                        type: object
-            401:
-              $ref: '#/components/responses/401'
-            404:
-              $ref: '#/components/responses/404'
-            500:
-              $ref: '#/components/responses/500'
-        """
-        chart = ChartDAO.find_by_id(pk)
-        if not chart:
-            return self.response_404()
-
-        ChartDAO.remove_favorite(chart)
-        return self.response(200, result="OK")
-
-    @expose("/warm_up_cache", methods=("PUT",))
-    @protect()
-    @safe
-    @statsd_metrics
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}"
-        f".warm_up_cache",
-        log_to_statsd=False,
-    )
-    def warm_up_cache(self) -> Response:
-        """Warm up the cache for the chart.
-        ---
-        put:
-          summary: Warm up the cache for the chart
-          description: >-
-            Warms up the cache for the chart.
-            Note for slices a force refresh occurs.
-            In terms of the `extra_filters` these can be obtained from records in the JSON
-            encoded `logs.json` column associated with the `explore_json` action.
-          requestBody:
-            description: >-
-              Identifies the chart to warm up cache for, and any additional dashboard or
-              filter context to use.
-            required: true
-            content:
-              application/json:
-                schema:
-                  $ref: "#/components/schemas/ChartCacheWarmUpRequestSchema"
-          responses:
-            200:
-              description: Each chart's warmup status
-              content:
-                application/json:
-                  schema:
-                    $ref: "#/components/schemas/ChartCacheWarmUpResponseSchema"
-            400:
-              $ref: '#/components/responses/400'
-            404:
-              $ref: '#/components/responses/404'
-            500:
-              $ref: '#/components/responses/500'
-        """
-        try:
-            body = ChartCacheWarmUpRequestSchema().load(request.json)
-        except ValidationError as error:
-            return self.response_400(message=error.messages)
-        try:
-            result = ChartWarmUpCacheCommand(
-                body["chart_id"],
-                body.get("dashboard_id"),
-                body.get("extra_filters"),
-            ).run()
-            return self.response(200, result=[result])
-        except CommandException as ex:
-            return self.response(ex.status, message=ex.message)
-
-    @expose("/import/", methods=("POST",))
+    @expose("/import/", methods=["POST"])
     @protect()
     @statsd_metrics
-    @event_logger.log_this_with_context(
-        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.import_",
-        log_to_statsd=False,
-    )
     @requires_form_data
     def import_(self) -> Response:
-        """Import chart(s) with associated datasets and databases.
+        """Import chart(s) with associated datasets and databases
         ---
         post:
-          summary: Import chart(s) with associated datasets and databases
+          parameters:
+          - in: query
+            schema:
+              type: integer
+            name: datasource_group_id
+          - in: query
+            schema:
+              type: integer
+            name: dataset_group_id
+          - in: query
+            schema:
+              type: integer
+            name: slice_group_id
           requestBody:
             required: true
             content:
@@ -1034,30 +910,6 @@ class ChartRestApi(BaseSupersetModelRestApi):
                     overwrite:
                       description: overwrite existing charts?
                       type: boolean
-                    ssh_tunnel_passwords:
-                      description: >-
-                        JSON map of passwords for each ssh_tunnel associated to a
-                        featured database in the ZIP file. If the ZIP includes a
-                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
-                        the password should be provided in the following format:
-                        `{"databases/MyDatabase.yaml": "my_password"}`.
-                      type: string
-                    ssh_tunnel_private_keys:
-                      description: >-
-                        JSON map of private_keys for each ssh_tunnel associated to a
-                        featured database in the ZIP file. If the ZIP includes a
-                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
-                        the private_key should be provided in the following format:
-                        `{"databases/MyDatabase.yaml": "my_private_key"}`.
-                      type: string
-                    ssh_tunnel_private_key_passwords:
-                      description: >-
-                        JSON map of private_key_passwords for each ssh_tunnel associated
-                        to a featured database in the ZIP file. If the ZIP includes a
-                        ssh_tunnel config in the path `databases/MyDatabase.yaml`,
-                        the private_key should be provided in the following format:
-                        `{"databases/MyDatabase.yaml": "my_private_key_password"}`.
-                      type: string
           responses:
             200:
               description: Chart import result
@@ -1093,30 +945,315 @@ class ChartRestApi(BaseSupersetModelRestApi):
             if "passwords" in request.form
             else None
         )
-        overwrite = request.form.get("overwrite") == "true"
-        ssh_tunnel_passwords = (
-            json.loads(request.form["ssh_tunnel_passwords"])
-            if "ssh_tunnel_passwords" in request.form
-            else None
+        overwrite = (
+            request.form.get("overwrite") == "true" or
+            request.form.get("overwrite") == "覆盖"
         )
-        ssh_tunnel_private_keys = (
-            json.loads(request.form["ssh_tunnel_private_keys"])
-            if "ssh_tunnel_private_keys" in request.form
-            else None
-        )
-        ssh_tunnel_priv_key_passwords = (
-            json.loads(request.form["ssh_tunnel_private_key_passwords"])
-            if "ssh_tunnel_private_key_passwords" in request.form
-            else None
-        )
+        datasource_group_id = int(request.form.get("datasource_group_id", 0)),
+        dataset_group_id = int(request.form.get("dataset_group_id", 0))
+        slice_group_id = int(request.form.get("slice_group_id", 0))
 
         command = ImportChartsCommand(
             contents,
             passwords=passwords,
             overwrite=overwrite,
-            ssh_tunnel_passwords=ssh_tunnel_passwords,
-            ssh_tunnel_private_keys=ssh_tunnel_private_keys,
-            ssh_tunnel_priv_key_passwords=ssh_tunnel_priv_key_passwords,
+            datasource_group_id=datasource_group_id,
+            dataset_group_id=dataset_group_id,
+            slice_group_id=slice_group_id,
         )
         command.run()
         return self.response(200, message="OK")
+
+    @record_tripartite_api_log
+    @expose("/simple", methods=["GET"])
+    @tripartite_certification
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs:
+        f"{self.__class__.__name__}.simple",
+        log_to_statsd=False,
+    )
+    def simple(self, **kwargs) -> Response:
+        """
+        获取当前应用对应的角色所有看板列表
+        @return:
+        """
+        try:
+            tripartite = kwargs.pop('tripartite')
+            role_id = kwargs.pop('role_id') if kwargs.get('role_id') else None
+            if tripartite:
+                if not role_id:
+                    return self.response_403()
+                from superset.extensions import db
+                from superset.models.app_attributes import AppAttribute
+                from sqlalchemy import select
+                from sqlalchemy.ext.declarative import declarative_base
+                from sqlalchemy import create_engine, Column, Integer, String, select, \
+                    Table, \
+                    ForeignKey, Text, func
+                from marshmallow import fields, post_load, Schema
+                from flask_appbuilder import Model
+                Base = declarative_base()
+
+                class UserRole(Base):
+                    __tablename__ = 'ab_user_role'
+
+                    id = Column(Integer, primary_key=True)
+                    user_id = Column(Integer)
+                    role_id = Column(String)
+
+                class UserAccessLevelResponseSchema(Schema):
+
+                    id = fields.Int()
+                    changed_by = fields.Nested(UserSchema)
+                    created_by = fields.Nested(UserSchema)
+
+                    datasource_id = fields.Int()
+                    datasource_type = fields.String()
+                    datasource_name = fields.String()
+                    viz_type = fields.String()
+                    params = fields.String()
+                    query_context = fields.String()
+                    description = fields.String()
+                    cache_timeout = fields.Int()
+                    perm = fields.String()
+                    schema_perm = fields.String()
+
+                    last_saved_at = fields.DateTime()
+                    last_saved_by_fk = fields.Nested(UserSchema)
+                    certified_by = fields.String()
+                    certification_details = fields.String()
+                    is_managed_externally = fields.Boolean()
+                    external_url = fields.String()
+
+                    changed_on = fields.DateTime()
+                    created_on = fields.DateTime()
+                    slice_name = fields.String()
+                    owners = fields.List(fields.Nested(UserSchema))
+                    roles = fields.List(fields.Nested(RolesSchema))
+
+                user_schema = UserAccessLevelResponseSchema()
+                app_key = request.headers.get("appKey")
+                query = db.session.query(AppAttribute).filter(
+                    AppAttribute.app_key == app_key,
+                ).first()
+                page = int(request.args.get("page", "1"))
+                page_size = int(request.args.get("page_size", "20"))
+                created_on = request.args.get("created_on")
+                created_by = request.args.get("created_by")
+                viz_type = request.args.get("viz_type")
+                slice_name = request.args.get("slice_name")
+                # print(page,page_size,created_on)
+                if query:
+                    # 存在数据，取出某个字段的值
+                    role_id = query.role_id
+
+                    users = db.session.query(UserRole.user_id).filter(
+                        UserRole.role_id == role_id).all()
+                    # 提取用户ID列表
+                    user_ids = [user[0] for user in users]
+
+                    # 创建映射类
+                    Base = declarative_base()
+
+                    class Users(Base):
+                        __tablename__ = 'ab_user'
+
+                        id = Column(Integer, primary_key=True)
+                        username = Column(String)
+                        first_name = Column(String)
+                        last_name = Column(String)
+
+                    user_id = db.session.query(Users.id).where(
+                        Users.username == created_by).first()[0]
+
+                    where_data = [
+                        Slice.created_by_fk.in_(user_ids)
+                    ]
+
+                    if created_on:
+                        where_data.append(
+                            func.date(Slice.created_on) == datetime.strptime(created_on,
+                                                                             '%Y-%m-%d').date()
+                        )
+
+                    if created_by:
+                        where_data.append(
+                            Slice.created_by_fk == user_id
+                        )
+                    if viz_type:
+                        where_data.append(
+                            Slice.viz_type == viz_type
+                        )
+                    if slice_name:
+                        where_data.append(
+                            Slice.slice_name == slice_name
+                        )
+
+                    query = db.session.query(Slice).filter(
+                        *where_data
+                    )
+                    pagination = query.paginate(page=page, per_page=page_size)
+
+                    result = {
+                        "data": [user_schema.dump(i) for i in pagination.items],
+                        "total": pagination.total
+                    }
+
+                    return self.response(200, result=result)
+                else:
+                    return self.response(400, result={"status": "Failed",
+                                                      "message": "The appKey is incorrect"})
+
+            else:
+                return self.response(401, result={
+                    "message": "Sign authentication failed, please calibrate the sign",
+                    "status": "Failed"
+                })
+
+        except Exception as e:
+            return self.response(400, result={"status": "Failed",
+                                              "message": str(e)})
+
+    @record_tripartite_api_log
+    @expose("/del/<pk>", methods=["DELETE"])
+    @tripartite_certification
+    def chart_del(self, pk, **kwargs) -> Response:
+
+        tripartite = kwargs.pop('tripartite')
+        role_id = kwargs.pop('role_id') if kwargs.get('role_id') else None
+        if tripartite:
+            if not role_id:
+                return self.response_403()
+            from superset.extensions import db
+            from superset.models.app_attributes import AppAttribute
+
+            app_key = request.headers.get("appKey")
+            query = db.session.query(AppAttribute).filter(
+                AppAttribute.app_key == app_key,
+            ).first()
+            if query:
+                try:
+                    data = db.session.query(Slice).filter_by(id=pk).first()
+                    if data:
+                        db.session.delete(data)
+                        db.session.commit()
+                        return self.response(200, result={"status": "Success",
+                                                          "message": "ok"})
+                    else:
+                        return self.response(400, result={"status": "Failed",
+                                                          "message": "No matching data found"})
+                except Exception as e:
+                    return self.response(400, result={"status": "Failed",
+                                                      "message": str(e)})
+            else:
+                return self.response(400, result={"status": "Failed",
+                                                  "message": "The appKey is incorrect"})
+        else:
+            return self.response(401, result={
+                "message": "Sign authentication failed, please calibrate the sign",
+                "status": "Failed"
+            })
+
+    @record_tripartite_api_log
+    @expose("/", methods=["GET"])
+    # @protect()
+    @rison(get_list_schema)
+    @tripartite_certification
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.get_list",
+        log_to_statsd=False,
+    )
+    def get_list(self, **kwargs: Any) -> Response:
+
+        tripartite = kwargs.pop('tripartite')
+        role_id = kwargs.pop('role_id') if kwargs.get('role_id') else None
+        if tripartite:
+            if not role_id:
+                return self.response_403()
+            else:
+                if kwargs.get('rison') and kwargs['rison'].get('columns'):
+                    kwargs['rison']['columns'].append('id')
+                response = super().get_list_headless(**kwargs)
+                if response.status_code == 200:
+                    res = dict()
+                    result = verify_slice_role(
+                        json.loads(response.data).get(API_RESULT_RES_KEY) or [],
+                        role_id)
+                    res[API_RESULT_RES_KEY] = result
+                    res['count'] = len(result)
+                    res['ids'] = [i.get('id') for i in result]
+                    return self.response(200, **res)
+                else:
+                    return response
+        else:
+            return super().get_list(**kwargs)
+
+    @expose("/<pk>", methods=["DELETE"])
+    # @protect()
+    @tripartite_certification
+    @safe
+    @statsd_metrics
+    @event_logger.log_this_with_context(
+        action=lambda self, *args, **kwargs: f"{self.__class__.__name__}.delete",
+        log_to_statsd=False,
+    )
+    def delete(self, pk: int, **kwargs: {dict}) -> Response:
+        """Deletes a Chart
+        ---
+        delete:
+          description: >-
+            Deletes a Chart.
+          parameters:
+          - in: path
+            schema:
+              type: integer
+            name: pk
+          responses:
+            200:
+              description: Chart delete
+              content:
+                application/json:
+                  schema:
+                    type: object
+                    properties:
+                      message:
+                        type: string
+            401:
+              $ref: '#/components/responses/401'
+            403:
+              $ref: '#/components/responses/403'
+            404:
+              $ref: '#/components/responses/404'
+            422:
+              $ref: '#/components/responses/422'
+            500:
+              $ref: '#/components/responses/500'
+        """
+        tripartite = kwargs.pop('tripartite')
+        api_func = kwargs.pop('api_func')
+
+        if tripartite:
+            role_id = kwargs.pop('role_id')
+            verify_slice_role(int(pk), role_id)
+            return super().delete_headless(pk)
+        else:
+            try:
+                protect()(api_func)(self, pk, **kwargs)
+                DeleteChartCommand(pk).run()
+                return self.response(200, message="OK")
+            except ChartNotFoundError:
+                return self.response_404()
+            except ChartForbiddenError:
+                return self.response_403()
+            except ChartDeleteFailedError as ex:
+                logger.error(
+                    "Error deleting model %s: %s",
+                    self.__class__.__name__,
+                    str(ex),
+                    exc_info=True,
+                )
+                return self.response_422(message=str(ex))

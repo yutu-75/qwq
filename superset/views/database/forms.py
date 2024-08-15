@@ -15,8 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 """Contains the logic to create cohesive forms on the explore view"""
+"""
+修改：李洪浩：20221220
+修改内容：UploadToDatabaseForm类中file_allowed_dbs方法修改为静态方法
+"""
+from typing import List
 
-from flask_appbuilder.fields import QuerySelectField
 from flask_appbuilder.fieldwidgets import BS3TextFieldWidget
 from flask_appbuilder.forms import DynamicForm
 from flask_babel import lazy_gettext as _
@@ -28,12 +32,12 @@ from wtforms import (
     SelectField,
     StringField,
 )
+from wtforms.ext.sqlalchemy.fields import QuerySelectField
 from wtforms.validators import DataRequired, Length, NumberRange, Optional, Regexp
 
 from superset import app, db, security_manager
 from superset.forms import (
     CommaSeparatedListField,
-    FileSizeLimit,
     filter_not_empty_values,
     JsonListField,
 )
@@ -43,8 +47,9 @@ config = app.config
 
 
 class UploadToDatabaseForm(DynamicForm):
+    # pylint: disable=E0211
     @staticmethod
-    def file_allowed_dbs() -> list[Database]:
+    def file_allowed_dbs() -> List[Database]:  # type: ignore
         file_enabled_dbs = (
             db.session.query(Database).filter_by(allow_file_upload=True).all()
         )
@@ -52,7 +57,7 @@ class UploadToDatabaseForm(DynamicForm):
             file_enabled_db
             for file_enabled_db in file_enabled_dbs
             if UploadToDatabaseForm.at_least_one_schema_is_allowed(file_enabled_db)
-            and UploadToDatabaseForm.is_engine_allowed_to_file_upl(file_enabled_db)
+               and UploadToDatabaseForm.is_engine_allowed_to_file_upl(file_enabled_db)
         ]
 
     @staticmethod
@@ -104,17 +109,22 @@ class UploadToDatabaseForm(DynamicForm):
         return False
 
 
+# 定义重复参数
+Column_Label = "Column Label(s)"
+Dataframe_Index = "Dataframe Index"
+Table_Name = "Table Name"
+
+
 class CsvToDatabaseForm(UploadToDatabaseForm):
     csv_file = FileField(
         _("CSV Upload"),
         description=_("Select a file to be uploaded to the database"),
         validators=[
             FileRequired(),
-            FileSizeLimit(config["CSV_UPLOAD_MAX_SIZE"]),
             FileAllowed(
                 config["ALLOWED_EXTENSIONS"].intersection(config["CSV_EXTENSIONS"]),
                 _(
-                    "Only the following file extensions are allowed: "
+                    "Only  the following file extensions are allowed: "
                     "%(allowed_extensions)s",
                     allowed_extensions=", ".join(
                         config["ALLOWED_EXTENSIONS"].intersection(
@@ -126,31 +136,20 @@ class CsvToDatabaseForm(UploadToDatabaseForm):
         ],
     )
     table_name = StringField(
-        _("Table Name"),
+        _(Table_Name),
         description=_("Name of table to be created with CSV file"),
         validators=[
             DataRequired(),
-            Regexp(r"^[^\.]+$", message=_("Table name cannot contain a schema")),
+            Regexp(r"^[^\.]+$", message=_("Table name cannot contain a schema ")),
         ],
         widget=BS3TextFieldWidget(),
     )
     database = QuerySelectField(
         _("Database"),
         description=_("Select a database to upload the file to"),
-        query_func=UploadToDatabaseForm.file_allowed_dbs,
-        get_pk_func=lambda a: a.id,
+        query_factory=UploadToDatabaseForm.file_allowed_dbs,
+        get_pk=lambda a: a.id,
         get_label=lambda a: a.database_name,
-    )
-    dtype = StringField(
-        _("Column Data Types"),
-        description=_(
-            "A dictionary with column names and their data types"
-            " if you need to change the defaults."
-            ' Example: {"user_id":"int"}. '
-            "Check Python's Pandas library for supported data types."
-        ),
-        validators=[Optional()],
-        widget=BS3TextFieldWidget(),
     )
     schema = StringField(
         _("Schema"),
@@ -198,9 +197,9 @@ class CsvToDatabaseForm(UploadToDatabaseForm):
         ),
         filters=[filter_not_empty_values],
     )
-    day_first = BooleanField(
-        _("Day First"),
-        description=_("DD/MM format dates, international and European format"),
+    infer_datetime_format = BooleanField(
+        _("Interpret Datetime Format Automatically"),
+        description=_("Interpret the datetime format automatically"),
     )
     decimal = StringField(
         _("Decimal Character"),
@@ -228,10 +227,10 @@ class CsvToDatabaseForm(UploadToDatabaseForm):
         widget=BS3TextFieldWidget(),
     )
     dataframe_index = BooleanField(
-        _("Dataframe Index"), description=_("Write dataframe index as a column")
+        _(Dataframe_Index), description=_("Write dataframe index as a column")
     )
     index_label = StringField(
-        _("Column Label(s)"),
+        _(Column_Label),
         description=_(
             "Column label for index column(s). If None is given "
             "and Dataframe Index is checked, Index Names are used"
@@ -277,12 +276,12 @@ class CsvToDatabaseForm(UploadToDatabaseForm):
 
 
 class ExcelToDatabaseForm(UploadToDatabaseForm):
-    name = StringField(
-        _("Table Name"),
+    table_name = StringField(
+        _(Table_Name),
         description=_("Name of table to be created from excel data."),
         validators=[
             DataRequired(),
-            Regexp(r"^[^\.]+$", message=_("Table name cannot contain a schema")),
+            Regexp(r"^[^\.]+$", message=_("Table name cannot contain a schema  ")),
         ],
         widget=BS3TextFieldWidget(),
     )
@@ -294,7 +293,7 @@ class ExcelToDatabaseForm(UploadToDatabaseForm):
             FileAllowed(
                 config["ALLOWED_EXTENSIONS"].intersection(config["EXCEL_EXTENSIONS"]),
                 _(
-                    "Only the following file extensions are allowed: "
+                    "Only the  following file extensions are allowed: "
                     "%(allowed_extensions)s",
                     allowed_extensions=", ".join(
                         config["ALLOWED_EXTENSIONS"].intersection(
@@ -315,8 +314,8 @@ class ExcelToDatabaseForm(UploadToDatabaseForm):
 
     database = QuerySelectField(
         _("Database"),
-        query_func=UploadToDatabaseForm.file_allowed_dbs,
-        get_pk_func=lambda a: a.id,
+        query_factory=UploadToDatabaseForm.file_allowed_dbs,
+        get_pk=lambda a: a.id,
         get_label=lambda a: a.database_name,
     )
     schema = StringField(
@@ -358,6 +357,10 @@ class ExcelToDatabaseForm(UploadToDatabaseForm):
         validators=[Optional(), NumberRange(min=0)],
         widget=BS3TextFieldWidget(),
     )
+    mangle_dupe_cols = BooleanField(
+        _("Mangle Duplicate Columns"),
+        description=_('Specify duplicate columns as "X.0, X.1".'),
+    )
     skiprows = IntegerField(
         _("Skip Rows"),
         description=_("Number of rows to skip at start of file."),
@@ -385,10 +388,10 @@ class ExcelToDatabaseForm(UploadToDatabaseForm):
         widget=BS3TextFieldWidget(),
     )
     index = BooleanField(
-        _("Dataframe Index"), description=_("Write dataframe index as a column.")
+        _(Dataframe_Index), description=_("Write dataframe index as a column.")
     )
     index_label = StringField(
-        _("Column Label(s)"),
+        _(Column_Label),
         description=_(
             "Column label for index column(s). If None is given "
             "and Dataframe Index is True, Index Names are used."
@@ -410,11 +413,11 @@ class ExcelToDatabaseForm(UploadToDatabaseForm):
 
 class ColumnarToDatabaseForm(UploadToDatabaseForm):
     name = StringField(
-        _("Table Name"),
+        _(Table_Name),
         description=_("Name of table to be created from columnar data."),
         validators=[
             DataRequired(),
-            Regexp(r"^[^\.]+$", message=_("Table name cannot contain a schema")),
+            Regexp(r"^[^\.]+$", message=_("Table name cannot contain a schema   ")),
         ],
         widget=BS3TextFieldWidget(),
     )
@@ -428,7 +431,7 @@ class ColumnarToDatabaseForm(UploadToDatabaseForm):
                     config["COLUMNAR_EXTENSIONS"]
                 ),
                 _(
-                    "Only the following file extensions are allowed: "
+                    "Only the following  file extensions are allowed: "
                     "%(allowed_extensions)s",
                     allowed_extensions=", ".join(
                         config["ALLOWED_EXTENSIONS"].intersection(
@@ -442,8 +445,8 @@ class ColumnarToDatabaseForm(UploadToDatabaseForm):
 
     database = QuerySelectField(
         _("Database"),
-        query_func=UploadToDatabaseForm.file_allowed_dbs,
-        get_pk_func=lambda a: a.id,
+        query_factory=UploadToDatabaseForm.file_allowed_dbs,
+        get_pk=lambda a: a.id,
         get_label=lambda a: a.database_name,
     )
     schema = StringField(
@@ -476,10 +479,10 @@ class ColumnarToDatabaseForm(UploadToDatabaseForm):
         validators=[Optional()],
     )
     index = BooleanField(
-        _("Dataframe Index"), description=_("Write dataframe index as a column.")
+        _(Dataframe_Index), description=_("Write dataframe index as a column.")
     )
     index_label = StringField(
-        _("Column Label(s)"),
+        _(Column_Label),
         description=_(
             "Column label for index column(s). If None is given "
             "and Dataframe Index is True, Index Names are used."
